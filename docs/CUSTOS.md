@@ -8,9 +8,9 @@ Preços públicos consultados em **14/11/2026**, em dólares americanos por mês
 | --- | ---: | --- |
 | Cloudflare Pages Free | 0,00 | Hospedagem estática, 500 builds/mês e um build concorrente. |
 | Droplet Basic Regular, 1 GiB RAM e 1 vCPU | 6,00 | API e proxy no mesmo servidor. Testar uso de memória antes de adicionar worker. |
-| Backup semanal do Droplet | 1,20 | 20% × US$ 6,00. A imagem cobre o disco do servidor. |
+| Backup semanal opcional do Droplet | 1,20 | 20% × US$ 6,00. A imagem cobre o disco do servidor. |
 | Supabase Free | 0,00 | 500 MB de banco, 1 GB de arquivos e 5 GB de saída mais 5 GB de saída em cache. Pausa após uma semana de inatividade, com limite de dois projetos ativos. |
-| **Subtotal fixo** | **7,20** | Antes de repositório pago, destino de backup independente, e-mail e observabilidade adicional. |
+| **Subtotal fixo com backup** | **7,20** | US$ 6,00 com Droplet avulso. Antes de repositório pago, destino de backup independente, e-mail e observabilidade adicional. |
 
 O piloto aceita interrupções. Use dados sintéticos nos testes e avalie os requisitos de privacidade, retenção e disponibilidade antes de usar dados de clientes. Exporte o banco regularmente para um destino independente. Backups automáticos do banco ficam fora do Free. Uma pausa do projeto afeta autenticação e acesso aos dados mesmo com o Droplet ativo. [Cloudflare Pages](https://developers.cloudflare.com/pages/platform/limits/), [Droplet Basic](https://www.digitalocean.com/pricing/droplets), [DigitalOcean Backups](https://docs.digitalocean.com/products/backups/details/pricing/), [Supabase Free](https://supabase.com/pricing), [Supabase Backups](https://supabase.com/docs/guides/platform/backups).
 
@@ -59,7 +59,7 @@ DigitalOcean App Platform tem API e worker gerenciados tarifados separadamente, 
 
 | Categoria | Base para orçamento |
 | --- | --- |
-| SMTP transacional | Exemplo AWS SES avulso a US$ 0,10 por mil envios e US$ 0,12/GB de anexos. Para 2.000 envios sem anexos, US$ 0,20 em envio. Usar SMTP próprio em PROD para convites e recuperação de senha. |
+| E-mail transacional | Exemplo AWS SES avulso a US$ 0,10 por mil envios e US$ 0,12/GB de anexos. Para 2.000 envios sem anexos, US$ 0,20 em envio. Use SMTP próprio para convites e recuperação. Um Send Email Hook pode substituir o SMTP se o envio for implementado via API. |
 | WhatsApp | Estimar mensagens entregues por categoria, mercado e tarifa Meta. Somar mensalidade, taxa por número ou sobretaxa se houver parceiro. |
 | NFS-e, certificados e terceiros | Cotar por prestador, município, volume e serviços contratados após escolher o conector. Acordar quem custeia certificado e renovação. |
 | IA opcional | Calcular tokens de entrada e saída e chamadas de ferramenta por módulo e empresa. A execução começa na fase correspondente. |

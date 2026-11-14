@@ -1,0 +1,24 @@
+services:
+  api:
+    pull_policy: always
+  proxy:
+    image: caddy:2-alpine
+    environment:
+      FN_API_HOSTNAME: ${FN_API_HOSTNAME:?Informe FN_API_HOSTNAME}
+    ports:
+      - 443:443
+    volumes:
+      - ${FN_CADDY_CERT_DIR:?Informe FN_CADDY_CERT_DIR}:/etc/caddy/tls:ro
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:

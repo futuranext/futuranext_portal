@@ -1,0 +1,20 @@
+services:
+  api:
+    environment:
+      FN_STATIC_DIR: /srv/frontend
+    networks:
+      - supabase
+    ports:
+      - 127.0.0.1:8088:8080
+    volumes:
+      - type: bind
+        source: ./dist
+        target: /srv/frontend
+        read_only: true
+        bind:
+          create_host_path: false
+
+networks:
+  supabase:
+    external: true
+    name: futuranext-local

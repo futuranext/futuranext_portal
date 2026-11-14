@@ -1,13 +1,13 @@
 # Segurança e privacidade
 
-Controles de referência para a implementação. Os resultados executados constam em [Testes](TESTES.md).
+Controles da Fase 1 e requisitos para as fases de produtos. Os resultados executados constam em [Testes](TESTES.md).
 
 ## Identidade e autorização
 
 - Aceitar JWT de sessão com algoritmo permitido por ambiente e assinatura validada. Verificar emissor, audiência `authenticated`, validade, `sub` UUID e tipo de identidade. Usar JWKS de endereço definido na configuração, rotação de chaves e tempos limite. Para ambiente local com chave simétrica legada, configurar validação no Auth e confrontar a identidade retornada com as claims. A API ignora papéis e permissões de metadados editáveis pelo usuário. [JWT no Supabase](https://supabase.com/docs/guides/auth/jwts)
 - Autorização é exigida em cada rota privada, incluindo downloads. A ação administrativa exige `aal2` e papel explícito, e suporte precisa de atribuição vigente. Cliente admin só delega papéis de cliente autorizados na própria empresa. Alterações de licenças, atribuições, membros ou papéis valem na próxima operação autorizada. Responder `404` a recursos privados sem visibilidade para evitar revelar sua existência. [MFA no Supabase](https://supabase.com/docs/guides/auth/auth-mfa/totp)
 - Bootstrap offline para conceder `super_admin` a um UUID de conta confirmada e conferido pelo operador. Primeiro privilégio concedido por comando temporário e auditado, com checagem transacional contra duplicação e execução concorrente. Credenciais de bootstrap ficam separadas do runtime. Revogação e recuperação de MFA precisam de procedimento operacional auditável.
-- Convite pendente por empresa, e-mail normalizado e papel delegável, com prazo e revogação. A concessão da associação ocorre em transação após autenticação, confirmação do e-mail e validação do convite vigente. Para identidades existentes, exigir que a conta autenticada corresponda ao convite. Evitar dois efeitos quando o mesmo convite for retomado. [Usuários e convites no Supabase](https://supabase.com/docs/guides/auth/users)
+- Convite pendente por empresa, e-mail normalizado e papel delegável, com prazo e controle de reenvio. A associação é concedida em transação após autenticação, confirmação do e-mail e validação do convite vigente. O vínculo é idempotente e pode ser desativado pelo administrador autorizado. [Usuários e convites no Supabase](https://supabase.com/docs/guides/auth/users)
 - Usar a role de runtime com mínimo privilégio e RLS forçada nas tabelas de tenant. Verificar que papéis públicos e chaves expostas no cliente carecem de acesso ao schema do aplicativo. Aplicar restrições de integridade no SQL. Separar autorização global e por empresa, inclusive nas funções auxiliares de políticas.
 
 ## Transporte, navegador, logs e credenciais

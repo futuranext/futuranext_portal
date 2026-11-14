@@ -2,6 +2,8 @@
 
 Registro da Fase 0 em 14/11/2026. Os caminhos da tabela são planejados e poderão ser ajustados conforme a implementação e seus testes.
 
+Na Fase 1, foi escolhido o Supabase Free para o piloto. O setup local roda Supabase Auth, PostgreSQL e Mailpit com Docker. Para envio hospedado, o Auth admite SMTP do Zoho com uma conta compatível. Uso da API de e-mail por hook e leitura de caixa via REST são extensões descritas em [Integrações](INTEGRACOES.md).
+
 ## Decisões arquiteturais
 
 | Decisão | Justificativa e consequência |

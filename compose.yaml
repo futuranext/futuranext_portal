@@ -1,0 +1,39 @@
+name: futuranext
+
+services:
+  api:
+    image: ${FN_API_IMAGE:-futuranext-api:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      FN_ENVIRONMENT: ${FN_ENVIRONMENT:-local}
+      FN_DATABASE_URL: ${FN_DATABASE_URL:?Informe FN_DATABASE_URL}
+      FN_SUPABASE_URL: ${FN_SUPABASE_URL:?Informe FN_SUPABASE_URL}
+      FN_SUPABASE_ISSUER: ${FN_SUPABASE_ISSUER:?Informe FN_SUPABASE_ISSUER}
+      FN_SUPABASE_PUBLISHABLE_KEY: ${FN_SUPABASE_PUBLISHABLE_KEY:?Informe FN_SUPABASE_PUBLISHABLE_KEY}
+      FN_SUPABASE_ADMIN_KEY: ${FN_SUPABASE_ADMIN_KEY:?Informe FN_SUPABASE_ADMIN_KEY}
+      FN_AUTH_MODE: ${FN_AUTH_MODE:-jwks}
+      FN_FRONTEND_URL: ${FN_FRONTEND_URL:?Informe FN_FRONTEND_URL}
+      FN_CORS_ORIGINS: ${FN_CORS_ORIGINS:?Informe FN_CORS_ORIGINS}
+      FN_STATIC_DIR: ${FN_STATIC_DIR:-}
+      FN_OPENAPI_ENABLED: ${FN_OPENAPI_ENABLED:-false}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8080/health/ready', timeout=3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"

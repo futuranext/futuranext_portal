@@ -1,6 +1,6 @@
 # Arquitetura da FuturaNext
 
-Proposta da Fase 0, revisada em 14/11/2026. O [diagnóstico](DIAGNOSTICO_ATUAL.md) descreve o sistema que existe hoje. A primeira implementação está planejada em [Decisões](DECISOES.md).
+O [diagnóstico](DIAGNOSTICO_ATUAL.md) registra a landing recebida. A Fase 1 implementa o núcleo de conta, empresas, catálogo, licenças e portal. O FastAPI atende o frontend local e verifica as sessões do Supabase Auth. O piloto hospedado foi definido com Supabase Free. O [plano e as decisões](DECISOES.md) detalham a divisão do trabalho.
 
 ## Componentes e acesso
 
@@ -27,9 +27,9 @@ flowchart LR
 | Interface | Fluxo |
 | --- | --- |
 | `/login`, `/recuperar-senha`, `/ativar-conta` | Login com e-mail e senha, recuperação e ativação via Supabase Auth. Administradores elevam a sessão para `aal2` via TOTP antes de ações administrativas. |
-| `/portal`, `/portal/produtos`, `/portal/perfil` | Consultar empresas disponíveis, selecionar uma quando houver mais de uma, trocar de empresa, listar produtos autorizados e mostrar o perfil da conta. |
+| `/portal`, `/portal/produtos`, `/portal/perfil`, `/portal/usuarios` | Consultar empresas disponíveis, selecionar uma quando houver mais de uma, trocar de empresa, listar produtos autorizados e mostrar o perfil da conta. Cliente admin com MFA gerencia usuários comuns na empresa selecionada. |
 | `/admin`, `/admin/clientes`, `/admin/usuarios`, `/admin/produtos`, `/admin/assinaturas` | Gestão real de empresas, convites, associações, catálogo e licenças, com auditoria das alterações. |
-| `/api/v1/auth/context`, `/api/v1/tenants/{tenant_id}/products` | Contexto de identidade e empresas elegíveis, seguido do catálogo habilitado e autorizado no tenant explícito. |
+| `/api/v1/auth/context`, `/api/v1/auth/invitations/{invitation_id}/accept`, `/api/v1/tenants/{tenant_id}/products` | Contexto de identidade e empresas elegíveis, aceite explícito de convite e leitura do catálogo autorizado no tenant informado. |
 | `/api/v1/admin/*` | Operações administrativas separadas por recurso, com checagens de papel, escopo, ação e MFA. |
 
 O catálogo usa metadados e chaves estáveis. Licenciamento, autorização e disponibilidade do módulo são estados independentes. Cadastrar um produto atualiza o catálogo sem precisar mudar o menu. O acesso a cada produto depende da implementação de seu módulo. Telas de agenda, emissão, chamados, jobs e integrações entram nas fases correspondentes.
