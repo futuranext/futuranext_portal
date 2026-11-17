@@ -2,6 +2,8 @@
 
 Este roteiro descreve a topologia e a sequência de publicação propostas. Os nomes de host são exemplos a confirmar com o titular do domínio. Operações em contas externas, DNS e produção dependem de autorização explícita.
 
+Para publicar a verificação em duas etapas obrigatória, atualize primeiro o frontend e confirme que uma conta comum chega à tela do autenticador. Em seguida, atualize a API que exige `aal2`. Essa mudança usa a revisão de banco já instalada. Configure os modelos e o remetente no [Supabase hospedado](INTEGRACOES.md#zoho-para-envio-e-recebimento).
+
 ## Ambientes
 
 | Recurso | HML | PROD |

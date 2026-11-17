@@ -1,4 +1,5 @@
 import {api, ApiError, auth, session} from './client.js';
+import {hasVerifiedSession, requireMfa} from './mfa.js';
 import {button, element, link, notice, runAction, screen, statusMessage, UserMessage} from './ui.js';
 
 export const view = document.body.dataset.view;
@@ -11,19 +12,19 @@ export function navigation(entries, active = view) {
   )));
 }
 
-function header(context, area) {
+function header(context, area, login) {
   const headerActions = document.getElementById('header-actions');
   const status = statusMessage();
   const logout = button('Sair', true);
   logout.addEventListener('click', runAction(logout, status, async () => {
     const {error} = await auth.signOut({scope: 'local'});
     if (error) throw new UserMessage('Não foi possível encerrar a sessão. Tente novamente.');
-    location.replace('/login');
+    location.replace(login);
   }, {singleUse: true}));
 
-  const shortcut = area === 'admin'
+  const shortcut = context && (area === 'admin'
     ? link('/portal', 'Portal do cliente')
-    : isStaff(context) && link('/admin', 'Administração');
+    : isStaff(context) && link('/admin', 'Administração'));
   headerActions.replaceChildren(...[shortcut, logout, status].filter(Boolean));
 }
 
@@ -49,8 +50,19 @@ export async function boot(area, render) {
     auth.onAuthStateChange((event, current) => {
       if (event === 'SIGNED_OUT' || event === 'TOKEN_REFRESHED' && !current) location.replace(login);
     });
+
+    header(null, area, login);
+    if (!await hasVerifiedSession()) {
+      await requireMfa(screen);
+      return;
+    }
+
     const context = await api('/auth/context');
-    header(context, area);
+    if (context.aal !== 'aal2') {
+      await requireMfa(screen);
+      return;
+    }
+    header(context, area, login);
     await render(context);
   } catch (error) {
     const message = error instanceof UserMessage ? error.message : 'Não foi possível carregar esta tela. Tente novamente.';

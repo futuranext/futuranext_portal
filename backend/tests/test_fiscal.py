@@ -158,12 +158,12 @@ def test_fiscal_http_enforces_licensing_roles_mfa_and_certificate_acl(platform):
 
     def synthetic_identity(request: Request) -> Identity:
         user = platform.alice if request.headers.get("x-fixture-user") == "alice" else platform.bob
-        level = "aal2" if request.headers.get("x-fixture-mfa") else "aal1"
+        level = "aal1" if request.headers.get("x-fixture-mfa") == "pending" else "aal2"
         return Identity(user, None, level, "synthetic-not-a-token")
 
     app.dependency_overrides[authenticate] = synthetic_identity
     alice = {"x-fixture-user": "alice"}
-    verified = {**alice, "x-fixture-mfa": "true"}
+    unverified = {**alice, "x-fixture-mfa": "pending"}
     emission = f"/api/v1/tenants/{tenant_a}/tools/nfse/fiscal"
     query_a = f"/api/v1/tenants/{tenant_a}/tools/nfse-consulta/fiscal"
     query_b = f"/api/v1/tenants/{tenant_b}/tools/nfse-consulta/fiscal"
@@ -174,7 +174,7 @@ def test_fiscal_http_enforces_licensing_roles_mfa_and_certificate_acl(platform):
     }
     with TestClient(app) as client:
         app.state.database = platform.database
-        assert client.get(query_b, headers=verified).status_code == 404
+        assert client.get(query_b, headers=alice).status_code == 404
         assert client.get(query_b).status_code == 200
         assert client.put(query_b + "/settings", json=settings).status_code == 403
         assert client.get(query_a, headers=alice).json()["certificate"]["status"] == "ausente"
@@ -183,8 +183,9 @@ def test_fiscal_http_enforces_licensing_roles_mfa_and_certificate_acl(platform):
         assert saved.json()["companies"][0]["cnpj"] == "12ABC34501DE35"
         assert client.get(emission, headers=alice).json()["settings"] is None
         assert client.get(query_b).json()["settings"] is None
-        assert client.put(query_a + "/certificate", headers=alice, json=payload).status_code == 403
-        result = client.put(query_a + "/certificate", headers=verified, json=payload)
+        assert client.get(query_a, headers=unverified).status_code == 403
+        assert client.put(query_a + "/certificate", headers=unverified, json=payload).status_code == 403
+        result = client.put(query_a + "/certificate", headers=alice, json=payload)
         assert result.status_code == 200, result.json()
         assert result.json()["status"] == "a_vencer"
         assert SYNTHETIC_PASSWORD not in result.text
@@ -212,12 +213,12 @@ def test_fiscal_http_enforces_licensing_roles_mfa_and_certificate_acl(platform):
             **payload,
             "content_base64": b64encode(synthetic_certificate(ends=90)).decode(),
         }
-        replacement = client.put(query_a + "/certificate", headers=verified, json=new_payload)
+        replacement = client.put(query_a + "/certificate", headers=alice, json=new_payload)
         assert replacement.status_code == 200, replacement.json()
         assert replacement.json()["status"] == "vigente"
-        assert client.delete(query_a + "/certificate", headers=alice).status_code == 403
-        assert client.delete(query_a + "/certificate", headers=verified).status_code == 204
-        assert client.get(query_a, headers=verified).json()["certificate"]["status"] == "ausente"
+        assert client.delete(query_a + "/certificate", headers=unverified).status_code == 403
+        assert client.delete(query_a + "/certificate", headers=alice).status_code == 204
+        assert client.get(query_a, headers=alice).json()["certificate"]["status"] == "ausente"
 
         workbook = client.get(emission + "/template", headers=alice)
         assert workbook.status_code == 200 and workbook.content.startswith(b"PK\x03\x04")

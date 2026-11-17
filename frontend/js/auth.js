@@ -1,4 +1,5 @@
 import {auth, session} from './client.js';
+import {requireMfa} from './mfa.js';
 import {actionForm, button, element, focusHeading, inputField, link, muted, notice, runAction, screen, statusMessage, UserMessage} from './ui.js';
 
 const view = document.body.dataset.view;
@@ -6,6 +7,7 @@ const currentUrl = new URL(location.href);
 const destination = currentUrl.searchParams.get('destino') === 'admin' ? '/admin' : '/portal';
 const fragment = new URLSearchParams(currentUrl.hash.slice(1));
 let otpHash = fragment.get('type') === view ? fragment.get('token_hash') : null;
+let recoveryCode = view === 'recovery' && !currentUrl.hash ? currentUrl.searchParams.get('code') : null;
 const callbackNames = ['token_hash', 'code', 'access_token', 'refresh_token'];
 const hasCallback = Boolean(currentUrl.hash) || callbackNames.some((name) => currentUrl.searchParams.has(name));
 for (const name of callbackNames) currentUrl.searchParams.delete(name);
@@ -56,6 +58,10 @@ function newPassword(userId) {
       if ((await session())?.user.id !== userId) throw new UserMessage('O link perdeu validade. Solicite um novo link.');
       const {error} = await auth.updateUser({password});
       if (error) {
+        if (error.code === 'insufficient_aal' && view === 'recovery') {
+          await verifyRecoveryFactor(userId);
+          return;
+        }
         if (error.code === 'same_password') throw new UserMessage('Escolha uma senha diferente da atual.');
         if (error.code === 'weak_password') throw new UserMessage('Escolha uma senha mais forte.');
         throw new UserMessage('Não foi possível salvar a senha. Confira o link e tente novamente.');
@@ -76,17 +82,46 @@ function newPassword(userId) {
   focusHeading(screen);
 }
 
+async function verifyRecoveryFactor(userId) {
+  if ((await session())?.user.id !== userId) {
+    throw new UserMessage('O link perdeu validade. Solicite um novo link.');
+  }
+  await requireMfa(screen, {
+    allowEnrollment: false,
+    onVerified: () => newPassword(userId),
+  });
+  focusHeading(screen);
+}
+
 function confirmation() {
   const status = statusMessage();
   const proceed = button(view === 'invite' ? 'Confirmar convite' : 'Confirmar recuperação');
   proceed.addEventListener('click', runAction(proceed, status, async () => {
-    const {data, error} = await auth.verifyOtp({token_hash: otpHash, type: view});
-    if (error || !data.session) throw new UserMessage('O link é inválido ou expirou. Solicite um novo link.');
+    const usedCode = Boolean(recoveryCode) && !otpHash;
+    const {data, error} = usedCode
+      ? await auth.exchangeCodeForSession(recoveryCode)
+      : await auth.verifyOtp({token_hash: otpHash, type: view});
+    if (error || !data.session || (usedCode && data.redirectType !== 'recovery')) {
+      if (usedCode && data.session) await auth.signOut({scope: 'local'});
+      throw new UserMessage(usedCode
+        ? 'Abra este link na aba em que pediu a recuperação ou solicite um novo link.'
+        : 'O link é inválido ou expirou. Solicite um novo link.');
+    }
     otpHash = null;
-    newPassword(data.session.user.id);
+    recoveryCode = null;
+    const userId = data.session.user.id;
+    if (view === 'recovery') {
+      const {data: levels} = await auth.mfa.getAuthenticatorAssuranceLevel();
+      if (levels?.nextLevel === 'aal2' && levels.currentLevel !== 'aal2') {
+        await verifyRecoveryFactor(userId);
+        return;
+      }
+    }
+    newPassword(userId);
   }, {singleUse: true}));
   screen.replaceChildren(element('div', {class: 'stack'},
-    muted('Confirme para usar este link e definir sua senha.'), proceed, status, signInLink(),
+    muted('Confirme para usar este link e definir sua senha.'), proceed, status,
+    view === 'recovery' ? link('/recuperar-senha', 'Solicitar outro link') : signInLink(),
   ));
 }
 
@@ -94,7 +129,7 @@ if (!auth) {
   screen.replaceChildren(notice('O acesso à conta está aguardando configuração pela equipe da FuturaNext.'));
 } else if (view === 'login') {
   loginScreen();
-} else if (otpHash && otpHash.length <= 512) {
+} else if ((otpHash && otpHash.length <= 512) || (recoveryCode && recoveryCode.length <= 512)) {
   confirmation();
 } else if (view === 'recovery') {
   recoveryRequest();

@@ -58,9 +58,13 @@ def totp_code(secret):
     return f"{value % 1_000_000:06d}"
 
 
-def activate_mfa(auth, activation_token):
+def enroll_factor(auth, activation_token):
     headers = bearer(activation_token)
-    factor = check(auth.post("/factors", json={"factor_type": "totp"}, headers=headers), 200)
+    return check(auth.post("/factors", json={"factor_type": "totp"}, headers=headers), 200)
+
+
+def activate_mfa(auth, activation_token, factor):
+    headers = bearer(activation_token)
     url = f"/factors/{factor['id']}"
     challenge = check(auth.post(f"{url}/challenge", json={}, headers=headers), 200)
     verified = check(auth.post(f"{url}/verify", json={
@@ -146,7 +150,7 @@ def test_login_invitation_recovery_and_tenant_isolation():
             }), 200)
             admin_aal1 = login["access_token"]
             check(api.get("/api/v1/admin/clients", headers=bearer(admin_aal1)), 403)
-            admin = bearer(activate_mfa(auth, admin_aal1))
+            admin = bearer(activate_mfa(auth, admin_aal1, enroll_factor(auth, admin_aal1)))
             tenant_a = check(api.post("/api/v1/admin/clients", headers=admin, json={
                 "name": "Empresa Teste A", "slug": slug_a,
             }), 201)["id"]
@@ -161,10 +165,13 @@ def test_login_invitation_recovery_and_tenant_isolation():
                 "email": client_mail, "role": "cliente_usuario",
             }), 201)
             assert invite["delivery"] == "sent"
-            client = bearer(check(auth.post("/verify", json={
+            client_aal1 = check(auth.post("/verify", json={
                 "type": "invite", "token_hash": mail_token(mail, client_mail, "invite"),
-            }), 200)["access_token"])
-            check(auth.put("/user", headers=client, json={"password": pwd}), 200)
+            }), 200)["access_token"]
+            check(auth.put("/user", headers=bearer(client_aal1), json={"password": pwd}), 200)
+            check(api.get("/api/v1/auth/context", headers=bearer(client_aal1)), 403)
+            factor = enroll_factor(auth, client_aal1)
+            client = bearer(activate_mfa(auth, client_aal1, factor))
             client_context = check(api.get("/api/v1/auth/context", headers=client), 200)
             assert client_context["organizations"] == []
             assert [item["id"] for item in client_context["invitations"]] == [invite["id"]]
@@ -186,16 +193,23 @@ def test_login_invitation_recovery_and_tenant_isolation():
             assert check(api.get(f"/api/v1/tenants/{tenant_b}/products", headers=client), 200) == []
 
             check(auth.post("/recover", json={"email": client_mail}), 200)
-            recovery = bearer(check(auth.post("/verify", json={
+            recovery_aal1 = check(auth.post("/verify", json={
                 "type": "recovery", "token_hash": mail_token(mail, client_mail, "recovery"),
-            }), 200)["access_token"])
+            }), 200)["access_token"]
             new_pwd = secrets.token_urlsafe(24)
+            rejected = auth.put("/user", headers=bearer(recovery_aal1), json={"password": new_pwd})
+            check(rejected, 401)
+            assert rejected.headers["x-sb-error-code"] == "insufficient_aal"
+            recovery = bearer(activate_mfa(auth, recovery_aal1, factor))
             check(auth.put("/user", headers=recovery, json={"password": new_pwd}), 200)
             check(auth.post("/token?grant_type=password", json={"email": client_mail, "password": pwd}), 400)
             new_login = check(auth.post("/token?grant_type=password", json={
                 "email": client_mail, "password": new_pwd,
             }), 200)
-            check(api.get("/api/v1/auth/context", headers=bearer(new_login["access_token"])), 200)
+            signed_in = new_login["access_token"]
+            check(api.get("/api/v1/auth/context", headers=bearer(signed_in)), 403)
+            verified = bearer(activate_mfa(auth, signed_in, factor))
+            check(api.get("/api/v1/auth/context", headers=verified), 200)
         finally:
             clean_test_records(owner, (slug_a, slug_b), (admin_mail, client_mail))
             owner.dispose()

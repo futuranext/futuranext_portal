@@ -26,7 +26,7 @@ flowchart LR
 
 | Interface | Fluxo |
 | --- | --- |
-| `/login`, `/recuperar-senha`, `/ativar-conta` | Login com e-mail e senha, recuperação e ativação via Supabase Auth. Administradores elevam a sessão para `aal2` via TOTP antes de ações administrativas. |
+| `/login`, `/recuperar-senha`, `/ativar-conta` | Login com e-mail e senha, recuperação e ativação via Supabase Auth. Todos os usuários precisam de uma sessão `aal2` via TOTP para acessar o portal e sua API. O reset de senha de uma conta com TOTP exige também o código do autenticador existente. |
 | `/portal`, `/portal/produtos`, `/portal/perfil`, `/portal/usuarios` | Selecionar empresa, usar ferramentas liberadas, solicitar novas ferramentas e gerenciar perfil. Cliente admin com MFA gerencia usuários comuns na empresa selecionada. |
 | `/admin/clientes`, `/admin/usuarios`, `/admin/produtos`, `/admin/assinaturas`, `/admin/acessos`, `/admin/solicitacoes` | Gestão de empresas, convites, acessos por empresa, catálogo, licenças e solicitações com auditoria das alterações. |
 | `/api/v1/auth/context`, `/api/v1/auth/invitations/{invitation_id}/accept`, `/api/v1/tenants/{tenant_id}/products` | Contexto de identidade e empresas elegíveis, aceite explícito de convite e leitura do catálogo autorizado no tenant informado. |

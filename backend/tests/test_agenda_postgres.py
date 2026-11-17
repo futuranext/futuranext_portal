@@ -49,7 +49,7 @@ def agenda(postgres_platform: Platform) -> Iterator[VerifiedAgenda]:
         if subject == str(platform.alice):
             return Identity(platform.alice, None, "aal2", "synthetic")
         if subject == str(platform.bob):
-            return Identity(platform.bob, None, "aal1", "synthetic")
+            return Identity(platform.bob, None, "aal2", "synthetic")
         raise HTTPException(401, "Sessão de teste ausente.")
 
     app.dependency_overrides[authenticate] = actor

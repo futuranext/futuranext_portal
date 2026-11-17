@@ -1,5 +1,9 @@
+from uuid import UUID
+
 from fastapi.testclient import TestClient
 
+from app.auth import Identity
+from app.dependencies import authenticate
 from app.main import create_app
 from app.settings import Settings
 
@@ -41,3 +45,20 @@ def test_api_rejects_excessive_json_body():
     with TestClient(create_app(Settings(_env_file=None))) as client:
         large = client.post("/api/v1/admin/clients", json={"name": "x" * 65536})
     assert large.status_code == 413
+
+
+def test_password_session_cannot_access_private_api_routes():
+    subject = UUID("d07fefb8-4bd3-4998-8c74-d1ec8e1c7122")
+    app = create_app(Settings(_env_file=None))
+    app.dependency_overrides[authenticate] = lambda: Identity(subject, None, "aal1", "synthetic")
+    with TestClient(app) as client:
+        responses = [
+            client.get("/api/v1/auth/context"),
+            client.post(f"/api/v1/auth/invitations/{subject}/accept"),
+            client.get(f"/api/v1/tenants/{subject}/products"),
+            client.get(f"/api/v1/tenants/{subject}/tools/barbearia/agenda"),
+            client.get("/api/v1/admin/clients"),
+        ]
+        assert all(response.status_code == 403 for response in responses)
+        assert all(response.json()["detail"] == "Conclua a verificação em duas etapas."
+                   for response in responses)

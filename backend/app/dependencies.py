@@ -37,7 +37,13 @@ def authenticate(auth: Auth, token: Token) -> Identity:
         raise HTTPException(503, "Autenticação indisponível.") from exc
 
 
-CurrentUser = Annotated[Identity, Depends(authenticate)]
+def require_verified_session(identity: Annotated[Identity, Depends(authenticate)]) -> Identity:
+    if identity.aal != "aal2":
+        raise HTTPException(403, "Conclua a verificação em duas etapas.")
+    return identity
+
+
+CurrentUser = Annotated[Identity, Depends(require_verified_session)]
 
 
 def get_database(request: Request) -> Database:
