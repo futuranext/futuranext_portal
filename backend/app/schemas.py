@@ -200,6 +200,10 @@ class Member(BaseModel):
     active: bool
 
 
+class TemporaryMemberCreated(Member):
+    email_delivery: Literal["sent", "unavailable", "failed"]
+
+
 class Users(BaseModel):
     members: list[Member]
     invitations: list[Invitation]

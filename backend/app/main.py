@@ -17,6 +17,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .auth import SupabaseAuth
 from .database import Database
+from .first_access_email import ZohoFirstAccessMailer
 from .modules.agenda import router as agenda_router
 from .modules.asaas import AsaasClient, AsaasConfig
 from .modules.billing import router as billing_router
@@ -93,6 +94,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database = Database(config.database_url.get_secret_value()) if config.database_url else None
         app.state.database = database
         with httpx.Client(timeout=5, follow_redirects=False, trust_env=False) as client:
+            if (
+                config.zoho_mail_client_id and config.zoho_mail_client_secret
+                and config.zoho_mail_refresh_token and config.zoho_mail_account_id
+                and config.zoho_mail_sender
+            ):
+                app.state.first_access_mailer = ZohoFirstAccessMailer(
+                    client, region=config.zoho_mail_region,
+                    client_id=config.zoho_mail_client_id,
+                    client_secret=config.zoho_mail_client_secret.get_secret_value(),
+                    refresh_token=config.zoho_mail_refresh_token.get_secret_value(),
+                    account_id=config.zoho_mail_account_id, sender_email=config.zoho_mail_sender,
+                )
             if config.asaas_api_key:
                 provider = AsaasConfig(
                     api_key=config.asaas_api_key.get_secret_value(),
@@ -131,6 +144,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.auth = None
     app.state.database = None
     app.state.asaas = None
+    app.state.first_access_mailer = None
     app.add_middleware(RequestSizeLimit)
     app.add_middleware(
         CORSMiddleware,

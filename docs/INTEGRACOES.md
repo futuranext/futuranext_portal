@@ -25,6 +25,14 @@ Para convite a e-mail novo, usar o fluxo administrativo de Supabase Auth com reg
 
 A pilha local captura os e-mails de autenticação em Mailpit, em `http://127.0.0.1:54324`. Para HML ou PROD, configure `Site URL` com a origem canônica do frontend e copie os templates versionados em `supabase/templates/`. Mantenha o rastreamento de cliques desativado para os links de Auth. Configuração de conta, DNS e credenciais de fornecedores fica para o ambiente autorizado. [Teste local de fluxos Auth](https://supabase.com/docs/guides/auth/testing-auth-flows), [Checklist Supabase](https://supabase.com/docs/guides/deployment/going-into-prod).
 
+### E-mail de primeiro acesso por senha temporária
+
+O cadastro por senha temporária envia um e-mail da FuturaNext pela API HTTPS do Zoho Mail. O botão abre `/login` na origem `FN_FRONTEND_URL` do ambiente. A mensagem inclui o e-mail de login e a senha temporária definida no cadastro. O portal exige a troca da senha no primeiro acesso e a verificação em duas etapas. Convites e recuperação de senha seguem o fluxo do Supabase Auth descrito acima. [Zoho Mail · envio de e-mail](https://www.zoho.com/mail/help/api/post-send-an-email.html) · [DigitalOcean · restrições de SMTP](https://docs.digitalocean.com/support/why-is-smtp-blocked/)
+
+1. Autorize o aplicativo OAuth do Zoho para a caixa remetente com o escopo `ZohoMail.messages.CREATE` e obtenha um refresh token. Se precisar consultar o ID da caixa pela API, use `ZohoMail.accounts.READ` na consulta de contas. Use o datacenter da caixa. [Zoho Mail · autorização e datacenters](https://www.zoho.com/mail/help/api/getting-started-with-api.html) · [Zoho Mail · consulta de contas](https://www.zoho.com/mail/help/api/get-all-users-accounts.html)
+2. No `.env.runtime` da API, configure `FN_ZOHO_MAIL_REGION` (por exemplo, `us` para `mail.zoho.com`), `FN_ZOHO_MAIL_CLIENT_ID`, `FN_ZOHO_MAIL_CLIENT_SECRET`, `FN_ZOHO_MAIL_REFRESH_TOKEN`, `FN_ZOHO_MAIL_ACCOUNT_ID` e `FN_ZOHO_MAIL_SENDER=suporte@futuranext.com.br`. Use um endereço autorizado pela conta OAuth e mantenha os segredos no runtime privado. Publique a imagem e o `compose.yaml` da mesma versão para aplicar as variáveis.
+3. Cadastre uma conta com um endereço de teste em **Administração → Usuários → Cadastro por senha temporária**. Confira a indicação de envio no painel, o botão na mensagem e a troca obrigatória. Se o envio falhar, o cadastro permanece válido e o painel orienta a entrega da senha por um canal privado.
+
 ## Produtos e conectores futuros
 
 | Serviço | Dependências e validação previstas |

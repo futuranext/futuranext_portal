@@ -208,12 +208,13 @@ def invite_tenant_user(
         return repo.record_invitation_delivery(invitation["id"], delivery) or invitation
 
 
-@admin.post("/clients/{tenant_id}/users/temporary", response_model=s.Member, status_code=201)
+@admin.post("/clients/{tenant_id}/users/temporary", response_model=s.TemporaryMemberCreated, status_code=201)
 def provision_temporary_member(
     tenant_id: UUID, payload: s.TemporaryMember,
-    identity: CurrentUser, database: Data, auth: Auth,
+    identity: CurrentUser, database: Data, auth: Auth, request: Request,
 ):
     email = payload.email.lower()
+    temporary_password = payload.temporary_password.get_secret_value()
     with tenant_repository(database, identity) as repo:
         require_permission(repo, "admin.tenant.manage")
         organization = resource(repo.get_organization(tenant_id))
@@ -224,7 +225,7 @@ def provision_temporary_member(
         candidate = repo.find_temporary_account(tenant_id, email)
         try:
             user_id = auth.provision_temporary_password(
-                email, payload.temporary_password.get_secret_value(), tenant_id, existing=candidate,
+                email, temporary_password, tenant_id, existing=candidate,
             )
         except PasswordActionRejected as exc:
             raise HTTPException(exc.status, str(exc)) from exc
@@ -232,7 +233,19 @@ def provision_temporary_member(
             raise HTTPException(503, "Autenticação indisponível.") from exc
         if not repo.link_temporary_account(user_id, tenant_id, payload.role):
             raise HTTPException(409, "Não foi possível vincular a conta. Confira a empresa e tente novamente.")
-    return s.Member(user_id=user_id, email=email, role=payload.role, active=True)
+
+    # O e-mail só é enviado depois que o vínculo está confirmado no banco.
+    mailer = request.app.state.first_access_mailer
+    delivery = "unavailable"
+    if mailer is not None:
+        sent = mailer.send(
+            frontend_url=request.app.state.settings.frontend_url, recipient=email,
+            temporary_password=temporary_password,
+        )
+        delivery = "sent" if sent else "failed"
+    return s.TemporaryMemberCreated(
+        user_id=user_id, email=email, role=payload.role, active=True, email_delivery=delivery,
+    )
 
 
 @admin.delete("/users/{user_id}", status_code=204)

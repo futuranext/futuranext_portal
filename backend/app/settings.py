@@ -2,8 +2,10 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .first_access_email import ZohoRegion
 
 
 class Settings(BaseSettings):
@@ -21,6 +23,12 @@ class Settings(BaseSettings):
     asaas_environment: Literal["sandbox", "production"] = "sandbox"
     asaas_api_key: SecretStr | None = None
     asaas_webhook_token: SecretStr | None = None
+    zoho_mail_region: ZohoRegion = "us"
+    zoho_mail_client_id: str | None = None
+    zoho_mail_client_secret: SecretStr | None = None
+    zoho_mail_refresh_token: SecretStr | None = None
+    zoho_mail_account_id: str | None = Field(default=None, pattern=r"^[0-9]{1,30}$")
+    zoho_mail_sender: str | None = Field(default=None, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     auth_mode: Literal["jwks", "remote"] = "jwks"
     frontend_url: str = "http://localhost:8088"
     cors_origins: list[str] = []

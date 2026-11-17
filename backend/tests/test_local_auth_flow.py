@@ -219,10 +219,32 @@ def test_login_invitation_recovery_and_tenant_isolation():
             initial = secrets.token_urlsafe(24)
             permanent = secrets.token_urlsafe(24)
             temp_inputs = {"role": "cliente_usuario", "temporary_password": initial}
+            delivery_attempts = []
+
+            class FirstAccessProbe:
+                def send(self, *, frontend_url, recipient, temporary_password):
+                    assert frontend_url == settings.frontend_url
+                    assert temporary_password == initial
+                    with owner.connect() as db:
+                        assert db.scalar(text("""
+                            SELECT EXISTS (
+                                SELECT FROM futuranext.organization_memberships AS member
+                                JOIN futuranext.profiles AS profile USING (user_id)
+                                WHERE member.tenant_id = :tenant AND profile.email = :email AND member.active
+                            )
+                        """), {"tenant": tenant_a, "email": recipient})
+                    delivery_attempts.append(recipient)
+                    return recipient == temporary_mail
+
+            api.app.state.first_access_mailer = FirstAccessProbe()
             check(api.post(route, headers=verified, json={**temp_inputs, "email": temporary_mail}), 403)
             check(api.post(route, headers=admin, json={**temp_inputs, "email": client_mail}), 409)
+            assert delivery_attempts == []
             member = check(api.post(route, headers=admin, json={**temp_inputs, "email": temporary_mail}), 201)
             assert member["email"] == temporary_mail and member["active"]
+            assert member["email_delivery"] == "sent"
+            assert "temporary_password" not in member
+            assert delivery_attempts == [temporary_mail]
             provisional = check(auth.post("/token?grant_type=password", json={
                 "email": temporary_mail, "password": initial,
             }), 200)
@@ -259,7 +281,10 @@ def test_login_invitation_recovery_and_tenant_isolation():
             }), 200)
             rescued = check(api.post(route, headers=admin, json={**temp_inputs, "email": pending_mail}), 201)
             assert rescued["email"] == pending_mail and rescued["user_id"] == opened_invite["user"]["id"]
+            assert rescued["email_delivery"] == "failed"
+            assert delivery_attempts == [temporary_mail, pending_mail]
             users = check(api.get(f"/api/v1/admin/clients/{tenant_a}/users", headers=admin), 200)
+            assert any(item["email"] == pending_mail for item in users["members"])
             assert not any(item["email"] == pending_mail for item in users["invitations"])
 
             deletion = f"/api/v1/admin/users/{user['id']}"
@@ -292,8 +317,10 @@ def test_login_invitation_recovery_and_tenant_isolation():
                     assert not db.scalar(
                         text(f"SELECT 1 FROM {table} WHERE {column} = :value LIMIT 1"), {"value": value},
                     )
+            api.app.state.first_access_mailer = None
             recreated = check(api.post(route, headers=admin, json={**temp_inputs, "email": client_mail}), 201)
             assert recreated["user_id"] != client_id
+            assert recreated["email_delivery"] == "unavailable"
             second_company = check(
                 api.get(f"/api/v1/admin/clients/{tenant_b}/users", headers=admin), 200,
             )

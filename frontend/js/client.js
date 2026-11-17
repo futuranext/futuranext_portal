@@ -55,10 +55,10 @@ export class ApiError extends UserMessage {
   }
 }
 
-export async function api(path, {method = 'GET', body, signal, responseType = 'json'} = {}) {
+export async function api(path, {method = 'GET', body, signal, responseType = 'json', timeoutMs = 15000} = {}) {
   const current = await session();
   if (!current) throw new ApiError(401);
-  const timeout = AbortSignal.timeout(15000);
+  const timeout = AbortSignal.timeout(timeoutMs);
   const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const headers = {
     Accept: responseType === 'blob' ? 'application/octet-stream, */*' : 'application/json',
