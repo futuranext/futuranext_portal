@@ -47,6 +47,10 @@ class TemporaryMember(Input):
     _validate_password = field_validator("temporary_password")(validate_password)
 
 
+class UserDeletion(Input):
+    email: Email
+
+
 class FirstPasswordChange(Input):
     temporary_password: SecretStr
     new_password: SecretStr

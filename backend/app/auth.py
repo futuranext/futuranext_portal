@@ -321,6 +321,18 @@ class SupabaseAuth:
         logger.warning("auth_invite_failed status=%s", response.status_code)
         return "pending"
 
+    def delete_user(self, user_id: UUID) -> None:
+        response = self._request(
+            "DELETE", f"/admin/users/{user_id}", headers=self._admin_headers(),
+            json={"should_soft_delete": False},
+        )
+        if response.is_success or (
+            response.status_code == 404 and self._error_code(response) == "user_not_found"
+        ):
+            return
+        logger.warning("auth_user_delete_failed status=%s", response.status_code)
+        raise AuthUnavailable
+
     def _request(self, method: str, path: str, **options: Any) -> httpx.Response:
         headers = {"apikey": self.publishable_key, **options.pop("headers", {})}
         try:

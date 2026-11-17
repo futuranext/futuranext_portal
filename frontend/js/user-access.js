@@ -1,14 +1,15 @@
 import {api, resource} from './client.js';
-import {actionForm, checkField, dateTime, element, field, inputField, link, muted, notice, panel, roleNames, screen, select} from './ui.js';
+import {userRemoval, userRemovedMessage} from './remove-user.js';
+import {actionForm, checkField, dateTime, element, field, focusHeading, inputField, link, muted, notice, panel, roleNames, screen, select} from './ui.js';
 
 const clientRoles = ['cliente_usuario', 'cliente_admin'].map((role) => [role, roleNames[role]]);
 const outcomes = {pending: 'Em análise', approved: 'Aprovada', rejected: 'Recusada'};
 
-export function userAccess() {
+export function userAccess(currentUserId) {
   const results = element('div', {class: 'stack'});
   const selected = element('div', {class: 'stack'});
   let loading;
-  async function showAccess(account, signal) {
+  async function showAccess(account, signal, onRemoved) {
     const root = `/admin/access/users/${resource(account.user_id)}`;
     const companies = await api(root, {signal});
     if (signal.aborted) return;
@@ -32,7 +33,8 @@ export function userAccess() {
       return element('details', {class: 'edit-disclosure'}, summary, form);
     });
     selected.replaceChildren(panel(account.email, ...cards,
-      cards.length ? null : muted('Nenhuma empresa cadastrada para associar.')));
+      cards.length ? null : muted('Nenhuma empresa disponível para vincular a esta conta.'),
+      userRemoval(account, {currentUserId, signal, onRemoved})));
   }
   const search = actionForm([
     inputField('E-mail da conta', 'q', {type: 'search', required: true, minlength: 2, maxlength: 254, autocomplete: 'off'}),
@@ -43,7 +45,7 @@ export function userAccess() {
     const {q} = Object.fromEntries(data);
     const accounts = await api(`/admin/access/users?q=${resource(q.trim())}`);
     if (!accounts.length) {
-      results.replaceChildren(notice('Nenhuma conta confirmada encontrada.'), link('/admin/usuarios', 'Convidar novo usuário'));
+      results.replaceChildren(notice('Nenhuma conta encontrada.'), link('/admin/usuarios', 'Convidar novo usuário'));
       return;
     }
     const options = [['', 'Selecione uma conta'], ...accounts.map(({user_id, email}) => [user_id, email])];
@@ -57,7 +59,14 @@ export function userAccess() {
       if (!account) return;
       selected.replaceChildren(notice('Carregando acessos…'));
       try {
-        await showAccess(account, signal);
+        await showAccess(account, signal, () => {
+          const option = Array.from(control.options).find(({value}) => value === account.user_id);
+          option?.remove();
+          control.value = '';
+          if (control.options.length === 1) results.replaceChildren();
+          selected.replaceChildren(notice(userRemovedMessage), link('/admin/usuarios', 'Cadastrar novo usuário'));
+          focusHeading(selected);
+        });
       } catch (error) {
         if (!signal.aborted) selected.replaceChildren(notice(error instanceof Error && error.message || 'Não foi possível buscar os acessos.', true));
       }

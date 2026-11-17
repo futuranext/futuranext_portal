@@ -430,11 +430,8 @@ def test_invite_delivery_and_acceptance_use_confirmed_identity(platform: Platfor
         )
     with platform.owner.begin() as owner:
         owner.execute(text("DELETE FROM auth.users WHERE id = :user"), {"user": invited})
-        assert owner.scalar(
-            text("""
-            SELECT accepted_at IS NOT NULL AND accepted_by IS NULL
-            FROM futuranext.invitations WHERE id = :invite
-        """),
+        assert not owner.scalar(
+            text("SELECT EXISTS (SELECT FROM futuranext.invitations WHERE id = :invite)"),
             {"invite": invite["id"]},
         )
 

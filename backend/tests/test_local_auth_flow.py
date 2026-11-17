@@ -124,6 +124,7 @@ def test_login_invitation_recovery_and_tenant_isolation():
     client_mail = f"e2e-client-{run_id}@example.com"
     temporary_mail = f"e2e-temporary-{run_id}@example.com"
     pending_mail = f"e2e-pending-{run_id}@example.com"
+    unconfirmed_mail = f"e2e-unconfirmed-{run_id}@example.com"
     pwd = secrets.token_urlsafe(24)
 
     with owner.begin() as db:
@@ -260,8 +261,59 @@ def test_login_invitation_recovery_and_tenant_isolation():
             assert rescued["email"] == pending_mail and rescued["user_id"] == opened_invite["user"]["id"]
             users = check(api.get(f"/api/v1/admin/clients/{tenant_a}/users", headers=admin), 200)
             assert not any(item["email"] == pending_mail for item in users["invitations"])
+
+            deletion = f"/api/v1/admin/users/{user['id']}"
+            check(api.request("DELETE", deletion, headers=admin, json={"email": admin_mail}), 409)
+            check(api.post(f"/api/v1/admin/clients/{tenant_a}/users", headers=admin, json={
+                "email": client_mail, "role": "cliente_usuario",
+            }), 201)
+            client_id = new_login["user"]["id"]
+            deletion = f"/api/v1/admin/users/{client_id}"
+            confirmation = {"email": client_mail}
+            check(api.request("DELETE", deletion, headers=verified, json=confirmation), 403)
+            check(api.request("DELETE", deletion, headers=bearer(admin_aal1), json=confirmation), 403)
+            check(api.request("DELETE", deletion, headers=admin, json={"email": pending_mail}), 409)
+            with owner.connect() as db:
+                assert db.scalar(text("SELECT count(*) FROM futuranext.audit_logs WHERE actor_id = :id"),
+                                 {"id": client_id}) > 0
+            check(api.request("DELETE", deletion, headers=admin, json=confirmation), 204)
+            check(api.get("/api/v1/auth/context", headers=verified), 401)
+            check(auth.post("/token?grant_type=password", json={
+                "email": client_mail, "password": new_pwd,
+            }), 400)
+            with owner.connect() as db:
+                for table, column, value in (
+                    ("auth.mfa_factors", "user_id", client_id),
+                    ("futuranext.profiles", "user_id", client_id),
+                    ("futuranext.organization_memberships", "user_id", client_id),
+                    ("futuranext.audit_logs", "actor_id", client_id),
+                    ("futuranext.invitations", "email", client_mail),
+                ):
+                    assert not db.scalar(
+                        text(f"SELECT 1 FROM {table} WHERE {column} = :value LIMIT 1"), {"value": value},
+                    )
+            recreated = check(api.post(route, headers=admin, json={**temp_inputs, "email": client_mail}), 201)
+            assert recreated["user_id"] != client_id
+            second_company = check(
+                api.get(f"/api/v1/admin/clients/{tenant_b}/users", headers=admin), 200,
+            )
+            assert all(item["email"] != client_mail for item in second_company["members"])
+
+            unconfirmed = check(auth.post("/admin/users", headers=admin_api, json={
+                "email": unconfirmed_mail, "password": pwd,
+            }), 200)
+            search = "/api/v1/admin/access/users"
+            assert check(api.get(search, headers=admin, params={"q": unconfirmed_mail}), 200) == [
+                {"user_id": unconfirmed["id"], "email": unconfirmed_mail},
+            ]
+            assert check(api.get(f"{search}/{unconfirmed['id']}", headers=admin), 200) == []
+            check(api.request("DELETE", f"/api/v1/admin/users/{unconfirmed['id']}", headers=admin,
+                              json={"email": unconfirmed_mail}), 204)
+            assert check(api.get(search, headers=admin, params={"q": unconfirmed_mail}), 200) == []
         finally:
-            clean_test_records(owner, (slug_a, slug_b), (admin_mail, client_mail, temporary_mail, pending_mail))
+            clean_test_records(
+                owner, (slug_a, slug_b), (admin_mail, client_mail, temporary_mail, pending_mail, unconfirmed_mail),
+            )
             owner.dispose()
 
 

@@ -104,6 +104,10 @@ p { overflow-wrap: anywhere; }
 .edit-disclosure:first-of-type { border-top: 0; }
 .edit-disclosure summary { cursor: pointer; font-weight: 700; padding: .25rem 0; overflow-wrap: anywhere; }
 .edit-disclosure form { margin: .75rem 0; }
+.user-removal { border-top: 1px solid var(--border); padding-top: .5rem; }
+.user-removal > summary { color: var(--danger); cursor: pointer; font-weight: 700; padding: .25rem 0; }
+.user-removal .button { background: var(--danger); color: #fff; }
+.user-removal .button:hover:not(:disabled) { background: #7e1928; }
 .mfa-qr { display: block; max-width: min(100%, 13rem); height: auto; }
 .mfa-secret { display: block; word-break: break-all; background: var(--paper); padding: .6rem; border-radius: 6px; user-select: all; }
 

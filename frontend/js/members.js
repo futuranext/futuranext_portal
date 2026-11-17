@@ -1,5 +1,6 @@
 import {api, resource} from './client.js';
-import {actionForm, checkField, dateTime, element, field, inputField, link, muted, panel, roleNames, select, UserMessage} from './ui.js';
+import {userRemoval, userRemovedMessage} from './remove-user.js';
+import {actionForm, checkField, dateTime, element, field, inputField, link, muted, panel, roleNames, select, statusMessage, UserMessage} from './ui.js';
 
 const memberRoles = [
   ['cliente_usuario', roleNames.cliente_usuario],
@@ -15,9 +16,10 @@ const temporaryPasswordInput = {
   type: 'password', autocomplete: 'new-password', minlength: 12, maxlength: 72, required: true,
 };
 
-export async function members(target, path, {canEdit, canAssignAdmin, canCreateWithTemporaryPassword = false, signal}) {
+export async function members(target, path, {canEdit, canAssignAdmin, canCreateWithTemporaryPassword = false, canRemoveUsers = false, currentUserId, signal}) {
   const result = await api(path, {signal});
   if (signal?.aborted) return;
+  const removalStatus = canRemoveUsers ? statusMessage() : null;
   const memberList = element('div', {class: 'stack compact'});
   const inviteList = element('ul', {class: 'record-list'});
   const roles = canAssignAdmin ? memberRoles : memberRoles.slice(0, 1);
@@ -39,7 +41,20 @@ export async function members(target, path, {canEdit, canAssignAdmin, canCreateW
         summary.textContent = `${member.email || 'E-mail indisponível'} · ${roleNames[role]} · ${active ? 'Ativo' : 'Inativo'}`;
         return 'Vínculo atualizado.';
       });
-      return element('details', {class: 'edit-disclosure'}, summary, edit);
+      const removal = canRemoveUsers ? userRemoval(member, {
+        currentUserId, signal,
+        onRemoved(email) {
+          result.members = result.members.filter((item) => item.user_id !== member.user_id);
+          result.invitations = result.invitations.filter((item) => item.email.toLowerCase() !== email);
+          renderUsers();
+          renderInvitations();
+          removalStatus.classList.add('success');
+          removalStatus.textContent = userRemovedMessage;
+          removalStatus.setAttribute('tabindex', '-1');
+          removalStatus.focus();
+        },
+      }) : null;
+      return element('details', {class: 'edit-disclosure'}, summary, edit, removal);
     }));
     if (!memberList.childElementCount) memberList.append(muted('Nenhum usuário cadastrado.'));
   }
@@ -67,6 +82,7 @@ export async function members(target, path, {canEdit, canAssignAdmin, canCreateW
     const index = result.invitations.findIndex((item) => item.id === invitation.id);
     if (index >= 0) result.invitations.splice(index, 1);
     result.invitations.unshift(invitation);
+    removalStatus?.replaceChildren();
     renderInvitations();
     form.reset();
     return `Convite registrado. ${deliveryLabels[invitation.delivery] ?? 'Confira a lista de convites'}.`;
@@ -106,6 +122,7 @@ export async function members(target, path, {canEdit, canAssignAdmin, canCreateW
     const index = result.members.findIndex((item) => item.user_id === member.user_id);
     if (index >= 0) result.members.splice(index, 1);
     result.members.unshift(member);
+    removalStatus?.replaceChildren();
     renderUsers();
     form.reset();
 
@@ -121,7 +138,7 @@ export async function members(target, path, {canEdit, canAssignAdmin, canCreateW
   }) : null;
 
   target.replaceChildren(
-    panel('Usuários vinculados', memberList),
+    panel('Usuários vinculados', removalStatus, memberList),
     temporaryForm ? panel('Cadastro por senha temporária',
       muted('Cadastre uma conta nova ou conclua um convite pendente desta empresa. Para uma conta pendente, a ação substitui a senha de entrada. Entregue a senha temporária por um canal privado.'),
       element('p', {class: 'muted'}, 'Para vincular uma conta já ativa, use ', link('/admin/acessos', 'Acessos por usuário'), '.'),

@@ -160,7 +160,7 @@ async function licenses(target, company, signal) {
   target.replaceChildren(panel(`Licenças de ${company.name}`, content));
 }
 
-async function companyManagement(canEdit) {
+async function companyManagement(canEdit, currentUserId) {
   const companies = await api(clientsPath);
   if (!companies.length) {
     screen.replaceChildren(notice('Nenhuma empresa disponível.'));
@@ -182,7 +182,8 @@ async function companyManagement(canEdit) {
     try {
       if (view === 'members') {
         await members(target, `${clientsPath}/${resource(company.id)}/users`, {
-          canEdit, canAssignAdmin: canEdit, canCreateWithTemporaryPassword: canEdit, signal,
+          canEdit, canAssignAdmin: canEdit, canCreateWithTemporaryPassword: canEdit,
+          canRemoveUsers: canEdit, currentUserId, signal,
         });
       } else {
         await licenses(target, company, signal);
@@ -217,13 +218,13 @@ void boot('admin', async (context) => {
   } else if (view === 'clients' || view === 'products' && canEdit) {
     await catalog(canEdit, view === 'products');
   } else if (view === 'access') {
-    userAccess();
+    userAccess(context.user_id);
   } else if (view === 'requests') {
     await toolRequests();
   } else if (view === 'billing') {
     const {renderBillingAdmin} = await import('./billing-admin.js');
     await renderBillingAdmin(screen);
   } else {
-    await companyManagement(canEdit);
+    await companyManagement(canEdit, context.user_id);
   }
 });

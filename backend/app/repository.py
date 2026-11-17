@@ -51,6 +51,11 @@ class Repository:
             tenant_id=tenant_id, email=email,
         )
 
+    def portal_user_deletion_email(self, user_id: UUID) -> str | None:
+        return self._scalar(
+            "SELECT futuranext.portal_user_deletion_email(:user_id)", user_id=user_id,
+        )
+
     def link_temporary_account(self, user_id: UUID, tenant_id: UUID, role: str) -> bool:
         return bool(self._scalar(
             "SELECT futuranext.link_temporary_account(:user_id, :tenant_id, :role)",
@@ -303,6 +308,18 @@ class Repository:
             )
             is not None
         )
+
+    def invitation_delivery_current(self, invitation_id: UUID) -> bool:
+        return bool(self._scalar(
+            """
+            SELECT EXISTS (
+                SELECT FROM futuranext.invitations
+                WHERE id = :invitation_id AND accepted_at IS NULL AND expires_at > now()
+                    AND delivery_claim_until > now()
+            )
+            """,
+            invitation_id=invitation_id,
+        ))
 
     def record_invitation_delivery(self, invitation_id: UUID, delivery: str) -> Record | None:
         return self._one(

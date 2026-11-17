@@ -72,6 +72,8 @@ def accept_invitation(invitation_id: UUID, identity: CurrentUser, database: Data
     if email is None:
         raise HTTPException(403, "Confirme seu e-mail para aceitar o convite.")
     with tenant_repository(database, identity) as repo:
+        if not repo.lock_password_account(email):
+            raise HTTPException(409, "Há uma alteração em andamento. Tente novamente.")
         if not repo.accept_invitation(invitation_id, email):
             raise HTTPException(404, "Convite indisponível.")
     return Response(status_code=204)
@@ -181,6 +183,8 @@ def invite_tenant_user(
         organization = resource(repo.get_organization(tenant_id))
         if not organization["active"]:
             raise HTTPException(409, "Reative a empresa antes de enviar convites.")
+        if not repo.lock_password_account(payload.email):
+            raise HTTPException(409, "Há uma alteração em andamento. Tente novamente.")
         invitation = resource(repo.create_invitation(tenant_id, payload.email, payload.role))
         if invitation["role"] != payload.role:
             raise HTTPException(409, "Já existe um convite pendente com outro perfil.")
@@ -194,8 +198,13 @@ def invite_tenant_user(
         return invitation
 
     frontend_url = request.app.state.settings.frontend_url
-    delivery = auth.send_invitation(payload.email, f"{frontend_url}/ativar-conta")
     with tenant_repository(database, identity, tenant_id) as repo:
+        if not repo.lock_password_account(payload.email):
+            return invitation
+        # O convite pode ter sido removido pela exclusão da conta entre as duas transações.
+        if not repo.invitation_delivery_current(invitation["id"]):
+            raise HTTPException(409, "O convite não está mais disponível. Atualize a página.")
+        delivery = auth.send_invitation(payload.email, f"{frontend_url}/ativar-conta")
         return repo.record_invitation_delivery(invitation["id"], delivery) or invitation
 
 
@@ -224,6 +233,27 @@ def provision_temporary_member(
         if not repo.link_temporary_account(user_id, tenant_id, payload.role):
             raise HTTPException(409, "Não foi possível vincular a conta. Confira a empresa e tente novamente.")
     return s.Member(user_id=user_id, email=email, role=payload.role, active=True)
+
+
+@admin.delete("/users/{user_id}", status_code=204)
+def delete_portal_user(
+    user_id: UUID, payload: s.UserDeletion, identity: CurrentUser, database: Data, auth: Auth,
+):
+    email = payload.email.lower()
+    with tenant_repository(database, identity) as repo:
+        require_permission(repo, "admin.tenant.manage")
+        if user_id == identity.user_id:
+            raise HTTPException(409, "Você não pode excluir a própria conta.")
+        if not repo.lock_password_account(email):
+            raise HTTPException(409, "Há uma alteração em andamento. Tente novamente.")
+        current_email = resource(repo.portal_user_deletion_email(user_id))
+        if current_email != email:
+            raise HTTPException(409, "O e-mail de confirmação não confere com a conta.")
+        try:
+            auth.delete_user(user_id)
+        except AuthUnavailable as exc:
+            raise HTTPException(503, "Não foi possível confirmar a exclusão. Atualize a lista.") from exc
+    return Response(status_code=204)
 
 
 @admin.patch("/clients/{tenant_id}/users/{user_id}", response_model=s.Member)
