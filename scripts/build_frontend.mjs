@@ -99,6 +99,7 @@ const portalRoutes = [
   ['portal/produtos', 'Ferramentas', 'products'],
   ['portal/perfil', 'Meu perfil', 'profile'],
   ['portal/usuarios', 'Usuários da empresa', 'members'],
+  ['portal/cobrancas', 'Cobranças', 'billing'],
 ];
 const adminRoutes = [
   ['admin', 'Visão geral', 'overview'],
@@ -108,6 +109,7 @@ const adminRoutes = [
   ['admin/assinaturas', 'Licenças', 'licenses'],
   ['admin/acessos', 'Acessos por usuário', 'access'],
   ['admin/solicitacoes', 'Solicitações de ferramentas', 'requests'],
+  ['admin/cobrancas', 'Cobranças por empresa', 'billing'],
 ];
 
 async function generatePages(templateFile, routes, common = {}) {

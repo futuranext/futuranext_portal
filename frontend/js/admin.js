@@ -13,6 +13,7 @@ const pages = [
   ['/admin/assinaturas', 'Licenças', 'licenses'],
   ['/admin/acessos', 'Acessos por usuário', 'access'],
   ['/admin/solicitacoes', 'Solicitações', 'requests'],
+  ['/admin/cobrancas', 'Cobranças', 'billing'],
 ];
 
 const clientsPath = '/admin/clients';
@@ -180,7 +181,9 @@ async function companyManagement(canEdit) {
     target.replaceChildren(notice('Carregando…'));
     try {
       if (view === 'members') {
-        await members(target, `${clientsPath}/${resource(company.id)}/users`, {canEdit, canAssignAdmin: canEdit, signal});
+        await members(target, `${clientsPath}/${resource(company.id)}/users`, {
+          canEdit, canAssignAdmin: canEdit, canCreateWithTemporaryPassword: canEdit, signal,
+        });
       } else {
         await licenses(target, company, signal);
       }
@@ -217,6 +220,9 @@ void boot('admin', async (context) => {
     userAccess();
   } else if (view === 'requests') {
     await toolRequests();
+  } else if (view === 'billing') {
+    const {renderBillingAdmin} = await import('./billing-admin.js');
+    await renderBillingAdmin(screen);
   } else {
     await companyManagement(canEdit);
   }

@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     supabase_publishable_key: SecretStr | None = None
     supabase_admin_key: SecretStr | None = None
     fiscal_master_key: SecretStr | None = None
+    asaas_environment: Literal["sandbox", "production"] = "sandbox"
+    asaas_api_key: SecretStr | None = None
+    asaas_webhook_token: SecretStr | None = None
     auth_mode: Literal["jwks", "remote"] = "jwks"
     frontend_url: str = "http://localhost:8088"
     cors_origins: list[str] = []

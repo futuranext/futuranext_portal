@@ -7,6 +7,7 @@ import {boot, navigation, view} from './workspace.js';
 const pages = [
   ['/portal', 'Visão geral', 'overview'],
   ['/portal/produtos', 'Ferramentas', 'products'],
+  ['/portal/cobrancas', 'Cobranças', 'billing'],
   ['/portal/perfil', 'Meu perfil', 'profile'],
 ];
 
@@ -85,6 +86,11 @@ async function scopedView(target, context, tenant, signal) {
   }
 
   const base = `/tenants/${resource(tenant.id)}`;
+  if (view === 'billing') {
+    const {renderBillingPortal} = await import('./billing-portal.js');
+    if (!signal.aborted) await renderBillingPortal(target, {tenant, signal});
+    return;
+  }
   if (view === 'members') {
     if (tenant.role !== 'cliente_admin') {
       target.replaceChildren(notice('Seu perfil nesta empresa não tem acesso à gestão de usuários.', true));

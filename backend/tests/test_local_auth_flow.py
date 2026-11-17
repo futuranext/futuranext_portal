@@ -122,6 +122,8 @@ def test_login_invitation_recovery_and_tenant_isolation():
     slug_a, slug_b = f"e2e-{run_id}-a", f"e2e-{run_id}-b"
     admin_mail = f"e2e-admin-{run_id}@example.com"
     client_mail = f"e2e-client-{run_id}@example.com"
+    temporary_mail = f"e2e-temporary-{run_id}@example.com"
+    pending_mail = f"e2e-pending-{run_id}@example.com"
     pwd = secrets.token_urlsafe(24)
 
     with owner.begin() as db:
@@ -210,8 +212,56 @@ def test_login_invitation_recovery_and_tenant_isolation():
             check(api.get("/api/v1/auth/context", headers=bearer(signed_in)), 403)
             verified = bearer(activate_mfa(auth, signed_in, factor))
             check(api.get("/api/v1/auth/context", headers=verified), 200)
+
+            route = f"/api/v1/admin/clients/{tenant_a}/users/temporary"
+            change = "/api/v1/auth/first-password"
+            initial = secrets.token_urlsafe(24)
+            permanent = secrets.token_urlsafe(24)
+            temp_inputs = {"role": "cliente_usuario", "temporary_password": initial}
+            check(api.post(route, headers=verified, json={**temp_inputs, "email": temporary_mail}), 403)
+            check(api.post(route, headers=admin, json={**temp_inputs, "email": client_mail}), 409)
+            member = check(api.post(route, headers=admin, json={**temp_inputs, "email": temporary_mail}), 201)
+            assert member["email"] == temporary_mail and member["active"]
+            provisional = check(auth.post("/token?grant_type=password", json={
+                "email": temporary_mail, "password": initial,
+            }), 200)
+            tmp_session = bearer(provisional["access_token"])
+            assert check(api.get(change, headers=tmp_session), 200) == {"required": True}
+            check(api.get("/api/v1/auth/context", headers=tmp_session), 403)
+            check(api.put(change, headers=tmp_session, json={
+                "temporary_password": secrets.token_urlsafe(24), "new_password": permanent,
+            }), 400)
+            check(api.put(change, headers=tmp_session, json={
+                "temporary_password": initial, "new_password": permanent,
+            }), 204)
+            check(auth.post("/token?grant_type=password", json={
+                "email": temporary_mail, "password": initial,
+            }), 400)
+            check(auth.post("/token?grant_type=refresh_token", json={
+                "refresh_token": provisional["refresh_token"],
+            }), 400)
+            settled = check(auth.post("/token?grant_type=password", json={
+                "email": temporary_mail, "password": permanent,
+            }), 200)["access_token"]
+            assert check(api.get(change, headers=bearer(settled)), 200) == {"required": False}
+            check(api.get("/api/v1/auth/context", headers=bearer(settled)), 403)
+            settled_mfa = bearer(activate_mfa(auth, settled, enroll_factor(auth, settled)))
+            context = check(api.get("/api/v1/auth/context", headers=settled_mfa), 200)
+            assert [item["id"] for item in context["organizations"]] == [tenant_a]
+
+            pending = check(api.post(f"/api/v1/admin/clients/{tenant_a}/users", headers=admin, json={
+                "email": pending_mail, "role": "cliente_usuario",
+            }), 201)
+            assert pending["delivery"] == "sent"
+            opened_invite = check(auth.post("/verify", json={
+                "type": "invite", "token_hash": mail_token(mail, pending_mail, "invite"),
+            }), 200)
+            rescued = check(api.post(route, headers=admin, json={**temp_inputs, "email": pending_mail}), 201)
+            assert rescued["email"] == pending_mail and rescued["user_id"] == opened_invite["user"]["id"]
+            users = check(api.get(f"/api/v1/admin/clients/{tenant_a}/users", headers=admin), 200)
+            assert not any(item["email"] == pending_mail for item in users["invitations"])
         finally:
-            clean_test_records(owner, (slug_a, slug_b), (admin_mail, client_mail))
+            clean_test_records(owner, (slug_a, slug_b), (admin_mail, client_mail, temporary_mail, pending_mail))
             owner.dispose()
 
 
@@ -219,8 +269,8 @@ def clean_test_records(owner, slugs, emails):
     with owner.begin() as db:
         tenants = db.scalars(text("SELECT id FROM futuranext.organizations WHERE slug IN (:a, :b)"),
                              {"a": slugs[0], "b": slugs[1]}).all()
-        users = db.scalars(text("SELECT id FROM auth.users WHERE email IN (:a, :b)"),
-                           {"a": emails[0], "b": emails[1]}).all()
+        users = db.scalars(text("SELECT id FROM auth.users WHERE email = ANY(:emails)"),
+                           {"emails": list(emails)}).all()
         for tenant in tenants:
             for table in ("invitations", "tenant_products", "organization_memberships"):
                 db.execute(text(f"DELETE FROM futuranext.{table} WHERE tenant_id = :tenant"),

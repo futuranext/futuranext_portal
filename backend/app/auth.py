@@ -3,7 +3,7 @@ import time
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import jwt
@@ -23,12 +23,20 @@ class AuthUnavailable(Exception):
     pass
 
 
+class PasswordActionRejected(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+
+
 @dataclass(frozen=True)
 class Identity:
     user_id: UUID
     email: str | None
     aal: Literal["aal1", "aal2"]
     token: str = field(repr=False)
+    first_password_required: bool = False
+    password_version: str | None = None
 
 
 class SupabaseAuth:
@@ -105,7 +113,15 @@ class SupabaseAuth:
         if not isinstance(subject, str):
             raise InvalidSession
         email = claims.get("email")
-        return Identity(UUID(subject), email if isinstance(email, str) else None, aal, token)
+        metadata = claims.get("app_metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        version = metadata.get("futuranext_password_version")
+        return Identity(
+            UUID(subject), email if isinstance(email, str) else None, aal, token,
+            metadata.get("futuranext_first_password") is True,
+            str(UUID(version)) if isinstance(version, str) else None,
+        )
 
     def _signing_key(self, key_id: str, algorithm: str) -> jwt.PyJWK:
         with self._key_lock:
@@ -161,16 +177,137 @@ class SupabaseAuth:
             return email.lower()
         return None
 
-    def send_invitation(self, email: str, redirect_url: str) -> Delivery:
+    def _admin_headers(self) -> dict[str, str]:
         if not self.admin_key:
-            logger.warning("auth_invite_unconfigured")
-            return "pending"
+            raise AuthUnavailable
         headers = {"apikey": self.admin_key}
         if not self.admin_key.startswith("sb_secret_"):
             headers["Authorization"] = f"Bearer {self.admin_key}"
+        return headers
+
+    @staticmethod
+    def _error_code(response: httpx.Response) -> str | None:
+        code = response.headers.get("x-sb-error-code")
+        if code:
+            return code
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        return payload.get("error_code") if isinstance(payload, dict) else None
+
+    @classmethod
+    def _check_password_response(cls, response: httpx.Response) -> None:
+        if response.is_success:
+            return
+        if response.status_code == 429:
+            raise PasswordActionRejected(429, "Aguarde antes de tentar novamente.")
+        if cls._error_code(response) in {"weak_password", "validation_failed"}:
+            raise PasswordActionRejected(422, "Confira o e-mail e escolha uma senha mais forte.")
+        raise AuthUnavailable
+
+    def _has_verified_factor(self, user_id: UUID) -> bool:
+        response = self._request("GET", f"/admin/users/{user_id}/factors", headers=self._admin_headers())
+        if response.status_code != 200:
+            raise AuthUnavailable
+        try:
+            factors = response.json()
+        except ValueError as exc:
+            raise AuthUnavailable from exc
+        if not isinstance(factors, list):
+            raise AuthUnavailable
+        return any(isinstance(factor, dict) and factor.get("status") == "verified" for factor in factors)
+
+    def provision_temporary_password(
+        self, email: str, password: str, tenant_id: UUID, *, existing: UUID | None,
+    ) -> UUID:
+        metadata = {
+            "futuranext_first_password": True,
+            "futuranext_password_company": str(tenant_id),
+            "futuranext_password_version": str(uuid4()),
+        }
+        payload = {"password": password, "email_confirm": True, "app_metadata": metadata}
+        headers = self._admin_headers()
+        if existing is None:
+            response = self._request(
+                "POST", "/admin/users", headers=headers, json={**payload, "email": email},
+            )
+            if not response.is_success and self._error_code(response) in {
+                "email_exists", "user_already_exists",
+            }:
+                raise PasswordActionRejected(
+                    409, "Já existe uma conta para este e-mail. Use Acessos por usuário ou o reset."
+                )
+        else:
+            if self._has_verified_factor(existing):
+                raise PasswordActionRejected(409, "A conta já tem um autenticador verificado.")
+            response = self._request("PUT", f"/admin/users/{existing}", headers=headers, json=payload)
+        self._check_password_response(response)
+        try:
+            user = response.json()
+            user_id = UUID(user["id"])
+            if user.get("email", "").lower() != email.lower() or (existing and user_id != existing):
+                raise ValueError
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise AuthUnavailable from exc
+        return user_id
+
+    def complete_first_password(self, identity: Identity, temporary: str, password: str) -> None:
+        user = self._user(identity)
+        metadata = user.get("app_metadata")
+        if (
+            not isinstance(metadata, dict) or metadata.get("futuranext_first_password") is not True
+            or metadata.get("futuranext_password_version") != identity.password_version
+            or not identity.email or user.get("email", "").lower() != identity.email.lower()
+        ):
+            raise PasswordActionRejected(409, "Entre novamente para atualizar a configuração da conta.")
+        if identity.aal != "aal2" and self._has_verified_factor(identity.user_id):
+            raise PasswordActionRejected(403, "Conclua a verificação em duas etapas.")
+        proof = self._request(
+            "POST", "/token", params={"grant_type": "password"},
+            json={"email": identity.email, "password": temporary},
+        )
+        if self._error_code(proof) == "invalid_credentials":
+            raise PasswordActionRejected(400, "A senha temporária não confere.")
+        self._check_password_response(proof)
+        try:
+            session = proof.json()
+            proof_token = session["access_token"]
+            proven_user = session["user"]
+            if not isinstance(proof_token, str):
+                raise TypeError
+        except (KeyError, ValueError, TypeError) as exc:
+            raise AuthUnavailable from exc
+        # A atualização administrativa troca a senha e revoga todas as sessões do usuário.
+        try:
+            proven_metadata = proven_user.get("app_metadata") if isinstance(proven_user, dict) else None
+            if (
+                not isinstance(proven_metadata, dict) or proven_user.get("id") != str(identity.user_id)
+                or proven_metadata.get("futuranext_first_password") is not True
+                or proven_metadata.get("futuranext_password_version") != identity.password_version
+            ):
+                raise PasswordActionRejected(409, "Entre novamente para atualizar a configuração da conta.")
+            response = self._request(
+                "PUT", f"/admin/users/{identity.user_id}", headers=self._admin_headers(),
+                json={"password": password, "app_metadata": {
+                    "futuranext_first_password": False,
+                    "futuranext_password_company": None,
+                    "futuranext_password_version": str(uuid4()),
+                }},
+            )
+            self._check_password_response(response)
+        except (AuthUnavailable, PasswordActionRejected):
+            try:
+                self._request("POST", "/logout", params={"scope": "local"},
+                              headers={"Authorization": f"Bearer {proof_token}"})
+            except AuthUnavailable:
+                pass
+            raise
+
+    def send_invitation(self, email: str, redirect_url: str) -> Delivery:
         try:
             response = self._request(
-                "POST", "/invite", headers=headers, params={"redirect_to": redirect_url},
+                "POST", "/invite", headers=self._admin_headers(), params={"redirect_to": redirect_url},
                 json={"email": email},
             )
         except AuthUnavailable:
@@ -178,13 +315,7 @@ class SupabaseAuth:
             return "pending"
         if response.is_success:
             return "sent"
-        error_code = response.headers.get("x-sb-error-code")
-        if not error_code:
-            try:
-                body = response.json()
-                error_code = body.get("error_code") if isinstance(body, dict) else None
-            except ValueError:
-                pass
+        error_code = self._error_code(response)
         if response.status_code in {400, 422} and error_code in {"email_exists", "user_already_exists"}:
             return "existing_account"
         logger.warning("auth_invite_failed status=%s", response.status_code)

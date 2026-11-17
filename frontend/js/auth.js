@@ -6,12 +6,17 @@ const view = document.body.dataset.view;
 const currentUrl = new URL(location.href);
 const destination = currentUrl.searchParams.get('destino') === 'admin' ? '/admin' : '/portal';
 const fragment = new URLSearchParams(currentUrl.hash.slice(1));
-let otpHash = fragment.get('type') === view ? fragment.get('token_hash') : null;
+const otpParameters = fragment.has('token_hash') ? fragment : currentUrl.searchParams;
+let otpHash = otpParameters.get('type') === view ? otpParameters.get('token_hash') : null;
 let recoveryCode = view === 'recovery' && !currentUrl.hash ? currentUrl.searchParams.get('code') : null;
-const callbackNames = ['token_hash', 'code', 'access_token', 'refresh_token'];
-const hasCallback = Boolean(currentUrl.hash) || callbackNames.some((name) => currentUrl.searchParams.has(name));
+const callbackError = fragment.get('error_code') ?? currentUrl.searchParams.get('error_code');
+const callbackNames = ['token_hash', 'code', 'access_token', 'refresh_token', 'error', 'error_code', 'error_description'];
+const hasCallback = callbackNames.some((name) => fragment.has(name) || currentUrl.searchParams.has(name));
 for (const name of callbackNames) currentUrl.searchParams.delete(name);
-if (hasCallback) history.replaceState(null, '', `${currentUrl.pathname}${currentUrl.search}`);
+if (hasCallback) {
+  currentUrl.searchParams.delete('type');
+  history.replaceState(null, '', `${currentUrl.pathname}${currentUrl.search}`);
+}
 
 const email = () => inputField('E-mail', 'email', {type: 'email', autocomplete: 'username', maxlength: 254, required: true});
 const signInLink = () => link('/login', 'Voltar para entrar');
@@ -33,7 +38,7 @@ function loginScreen() {
 
 function recoveryRequest() {
   screen.replaceChildren(element('div', {class: 'stack'},
-    muted('Informe seu e-mail para solicitar um link de recuperação.'),
+    muted('Informe seu e-mail para solicitar um link de recuperação. Abra o link novo na mesma aba em que fez o pedido.'),
     actionForm([email()], 'Enviar link', async (data) => {
       const {error} = await auth.resetPasswordForEmail(data.get('email').trim(), {redirectTo: new URL('/recuperar-senha', location.origin).href});
       if (error && error.status !== 400 && error.status !== 404) {
@@ -133,7 +138,12 @@ if (!auth) {
   confirmation();
 } else if (view === 'recovery') {
   recoveryRequest();
-  if (hasCallback) screen.prepend(notice('Este link é inválido. Solicite um novo link abaixo.', true));
+  if (hasCallback) {
+    const message = ['otp_expired', 'flow_state_expired', 'flow_state_not_found'].includes(callbackError)
+      ? 'Este link expirou ou já foi usado. Solicite um link novo abaixo.'
+      : 'Não foi possível confirmar o link recebido. Solicite um link novo abaixo.';
+    screen.prepend(notice(message, true));
+  }
 } else {
   screen.replaceChildren(element('div', {class: 'stack'},
     notice('Abra o link do convite recebido por e-mail. Se já tem uma conta, entre para consultar seus convites.'), signInLink(),

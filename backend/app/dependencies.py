@@ -37,7 +37,12 @@ def authenticate(auth: Auth, token: Token) -> Identity:
         raise HTTPException(503, "Autenticação indisponível.") from exc
 
 
-def require_verified_session(identity: Annotated[Identity, Depends(authenticate)]) -> Identity:
+AuthenticatedSession = Annotated[Identity, Depends(authenticate)]
+
+
+def require_verified_session(identity: AuthenticatedSession) -> Identity:
+    if identity.first_password_required:
+        raise HTTPException(403, "Troque a senha temporária antes de acessar o portal.")
     if identity.aal != "aal2":
         raise HTTPException(403, "Conclua a verificação em duas etapas.")
     return identity
@@ -63,7 +68,10 @@ def tenant_repository(
     tenant_id: UUID | None = None,
 ) -> Iterator[Repository]:
     with database.session(identity.user_id, identity.aal, tenant_id) as connection:
-        yield Repository(connection)
+        repository = Repository(connection)
+        if not repository.password_session_current(identity.password_version):
+            raise HTTPException(401, "A sessão foi substituída. Entre novamente.")
+        yield repository
 
 
 def require_permission(repository: Repository, permission: str, status: int = 403) -> None:

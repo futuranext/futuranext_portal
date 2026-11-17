@@ -1,5 +1,5 @@
 import {api, resource} from './client.js';
-import {actionForm, checkField, dateTime, element, field, inputField, muted, panel, roleNames, select} from './ui.js';
+import {actionForm, checkField, dateTime, element, field, inputField, link, muted, panel, roleNames, select, UserMessage} from './ui.js';
 
 const memberRoles = [
   ['cliente_usuario', roleNames.cliente_usuario],
@@ -11,7 +11,11 @@ const deliveryLabels = {
   pending: 'Envio pendente',
 };
 
-export async function members(target, path, {canEdit, canAssignAdmin, signal}) {
+const temporaryPasswordInput = {
+  type: 'password', autocomplete: 'new-password', minlength: 12, maxlength: 72, required: true,
+};
+
+export async function members(target, path, {canEdit, canAssignAdmin, canCreateWithTemporaryPassword = false, signal}) {
   const result = await api(path, {signal});
   if (signal?.aborted) return;
   const memberList = element('div', {class: 'stack compact'});
@@ -68,8 +72,61 @@ export async function members(target, path, {canEdit, canAssignAdmin, signal}) {
     return `Convite registrado. ${deliveryLabels[invitation.delivery] ?? 'Confira a lista de convites'}.`;
   }) : null;
 
+  const temporaryForm = canEdit && canCreateWithTemporaryPassword ? actionForm([
+    element('div', {class: 'form-grid'},
+      inputField('E-mail', 'email', {type: 'email', maxlength: 254, required: true}),
+      field('Perfil', select(roles, {name: 'role', required: true}, 'cliente_usuario')),
+      inputField('Senha temporária', 'temporary_password', temporaryPasswordInput,
+        'Use pelo menos 12 caracteres e até 72 bytes. Acentos e símbolos podem ocupar mais de um byte.'),
+      inputField('Confirme a senha temporária', 'password_confirmation', temporaryPasswordInput),
+    ),
+  ], 'Cadastrar e vincular', async (data, form) => {
+    const password = data.get('temporary_password');
+    const confirmation = data.get('password_confirmation');
+    form.elements.namedItem('temporary_password').value = '';
+    form.elements.namedItem('password_confirmation').value = '';
+    data.delete('temporary_password');
+    data.delete('password_confirmation');
+    if (password !== confirmation) throw new UserMessage('As duas senhas precisam ser iguais.');
+    if ([...password].length < 12 || new TextEncoder().encode(password).byteLength > 72) {
+      throw new UserMessage('A senha temporária precisa ter pelo menos 12 caracteres e no máximo 72 bytes.');
+    }
+
+    let member;
+    try {
+      member = await api(path + '/temporary', {
+        method: 'POST',
+        body: {email: data.get('email').trim(), role: data.get('role'), temporary_password: password},
+        signal,
+      });
+    } catch (error) {
+      if (error.status === 409) throw new UserMessage('Já existe uma conta ativa ou um cadastro incompatível. Confira os acessos pelo e-mail.');
+      throw error;
+    }
+    const index = result.members.findIndex((item) => item.user_id === member.user_id);
+    if (index >= 0) result.members.splice(index, 1);
+    result.members.unshift(member);
+    renderUsers();
+    form.reset();
+
+    try {
+      const updated = await api(path, {signal});
+      result.invitations = updated.invitations;
+      renderInvitations();
+    } catch (error) {
+      if (signal?.aborted) return;
+      return 'Usuário cadastrado e vinculado. Reabra esta empresa para atualizar a lista de convites.';
+    }
+    return 'Usuário cadastrado e vinculado à empresa.';
+  }) : null;
+
   target.replaceChildren(
     panel('Usuários vinculados', memberList),
+    temporaryForm ? panel('Cadastro por senha temporária',
+      muted('Cadastre uma conta nova ou conclua um convite pendente desta empresa. Para uma conta pendente, a ação substitui a senha de entrada. Entregue a senha temporária por um canal privado.'),
+      element('p', {class: 'muted'}, 'Para vincular uma conta já ativa, use ', link('/admin/acessos', 'Acessos por usuário'), '.'),
+      temporaryForm,
+    ) : null,
     panel('Convites', inviteForm,
       canEdit ? muted('Para reenviar um convite sem aceite que esteja pendente ou enviado, aguarde um minuto e informe o mesmo e-mail e perfil.') : null,
       inviteList,

@@ -37,3 +37,13 @@ A pilha local captura os e-mails de autenticação em Mailpit, em `http://127.0.
 | IA e cobrança futura | Selecionar após definir contrato, retenção, custos, idempotência e modelo de acesso. Cobrança atualiza licenças via evento auditado e conciliável. IA só usa dados autorizados e limites por tenant/produto. |
 
 Separar segredos dos ambientes e manter credenciais reais fora de arquivos do workspace e dos testes. Documentar de quem depende a habilitação de cada provedor no momento da implementação. [Controles de segurança](SEGURANCA.md)
+
+## Asaas
+
+O portal usa a fatura hospedada do Asaas por meio de `POST /v3/payments` com `billingType=UNDEFINED`. O cliente escolhe uma das formas habilitadas na conta e digita os dados de pagamento no Asaas. O portal registra referência própria, valor, situação e link da fatura. [Criar cobrança](https://docs.asaas.com/reference/criar-nova-cobranca)
+
+1. Para homologar, use um ambiente de teste separado, uma conta Asaas Sandbox e clientes de teste. No arquivo de runtime da API, configure `FN_ASAAS_ENVIRONMENT=sandbox`, `FN_ASAAS_API_KEY` com a chave do ambiente e `FN_ASAAS_WEBHOOK_TOKEN` com um token exclusivo de webhook. A chave de produção fica no runtime de produção e usa `FN_ASAAS_ENVIRONMENT=production`. [Sandbox do Asaas](https://docs.asaas.com/docs/sandbox)
+2. Cadastre um webhook no Asaas para a rota `/api/v1/integrations/asaas/events` da API correspondente. Em produção, use `https://api.futuranext.com.br/api/v1/integrations/asaas/events`. Use o mesmo token configurado no runtime, enviado pelo Asaas como `asaas-access-token`. Selecione os eventos de cobranças, inclusive criação, pagamento confirmado, recebido, vencido, excluído, restaurado, estorno e chargeback. [Configurar webhook](https://docs.asaas.com/docs/criar-novo-webhook-pela-aplicacao-web) · [Eventos de cobrança](https://docs.asaas.com/docs/webhook-para-cobrancas)
+3. Em **Administração → Cobranças**, vincule o `cus_…` de teste. Gere uma fatura, abra o pagamento pelo portal e confira as opções de Boleto, Pix e Cartão configuradas no Asaas. Valide o webhook e a situação exibida.
+
+O webhook usa o identificador do evento para deduplicação e consulta o estado atual da cobrança no Asaas. Uma tentativa inconclusiva de criação reaproveita a referência `futuranext:invoice:<uuid>` na conciliação. Se o Asaas ainda não localizar a referência, confira no painel do provedor antes de emitir outra cobrança. A integração antiga do gateway WhatsApp pode continuar tendo assinaturas próprias. Confira as cobranças existentes antes de consolidar esses serviços no portal. [Webhooks do Asaas](https://docs.asaas.com/docs/about-webhooks)

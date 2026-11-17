@@ -18,6 +18,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .auth import SupabaseAuth
 from .database import Database
 from .modules.agenda import router as agenda_router
+from .modules.asaas import AsaasClient, AsaasConfig
+from .modules.billing import router as billing_router
 from .modules.catalog import router as catalog_router
 from .modules.fiscal import router as fiscal_router
 from .modules.integrations import router as integrations_router
@@ -36,6 +38,7 @@ PAGES = {
     "portal/produtos": "portal/produtos.html",
     "portal/perfil": "portal/perfil.html",
     "portal/usuarios": "portal/usuarios.html",
+    "portal/cobrancas": "portal/cobrancas.html",
     "admin": "admin.html",
     "admin/clientes": "admin/clientes.html",
     "admin/produtos": "admin/produtos.html",
@@ -43,6 +46,7 @@ PAGES = {
     "admin/assinaturas": "admin/assinaturas.html",
     "admin/acessos": "admin/acessos.html",
     "admin/solicitacoes": "admin/solicitacoes.html",
+    "admin/cobrancas": "admin/cobrancas.html",
 }
 LANDING_FILES = {
     "config.js", "script.js", "styles.css", "assets/logo-mark.svg", "assets/favicon.svg",
@@ -89,6 +93,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database = Database(config.database_url.get_secret_value()) if config.database_url else None
         app.state.database = database
         with httpx.Client(timeout=5, follow_redirects=False, trust_env=False) as client:
+            if config.asaas_api_key:
+                provider = AsaasConfig(
+                    api_key=config.asaas_api_key.get_secret_value(),
+                    environment=config.asaas_environment,
+                    webhook_token=(
+                        config.asaas_webhook_token.get_secret_value()
+                        if config.asaas_webhook_token else None
+                    ),
+                )
+                app.state.asaas = AsaasClient(client, provider)
             if config.supabase_url and config.supabase_issuer and config.supabase_publishable_key:
                 app.state.auth = SupabaseAuth(
                     client,
@@ -116,6 +130,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = config
     app.state.auth = None
     app.state.database = None
+    app.state.asaas = None
     app.add_middleware(RequestSizeLimit)
     app.add_middleware(
         CORSMiddleware,
@@ -178,6 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(catalog_router)
     app.include_router(fiscal_router)
     app.include_router(agenda_router)
+    app.include_router(billing_router)
     app.include_router(integrations_router)
     app.include_router(integrations_webhook_router)
     static = config.static_dir.resolve()

@@ -6,6 +6,7 @@ from pydantic import (
     AwareDatetime,
     BaseModel,
     ConfigDict,
+    SecretStr,
     StringConstraints,
     field_validator,
     model_validator,
@@ -22,6 +23,13 @@ Email = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, ma
                                          pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")]
 
 
+def validate_password(value: SecretStr) -> SecretStr:
+    password = value.get_secret_value()
+    if len(password) < 12 or len(password.encode("utf-8")) > 72 or "\x00" in password:
+        raise ValueError("Use pelo menos 12 caracteres respeitando o limite de 72 bytes.")
+    return value
+
+
 class Input(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -29,6 +37,31 @@ class Input(BaseModel):
 class ClientCreate(Input):
     name: Name
     slug: Slug
+
+
+class TemporaryMember(Input):
+    email: Email
+    role: ClientRole
+    temporary_password: SecretStr
+
+    _validate_password = field_validator("temporary_password")(validate_password)
+
+
+class FirstPasswordChange(Input):
+    temporary_password: SecretStr
+    new_password: SecretStr
+
+    _validate_password = field_validator("temporary_password", "new_password")(validate_password)
+
+    @model_validator(mode="after")
+    def check_changed(self) -> "FirstPasswordChange":
+        if self.temporary_password == self.new_password:
+            raise ValueError("Escolha uma senha diferente da temporária.")
+        return self
+
+
+class FirstPasswordStatus(BaseModel):
+    required: bool
 
 
 class ClientUpdate(Input):

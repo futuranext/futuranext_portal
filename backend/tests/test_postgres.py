@@ -92,7 +92,9 @@ def platform() -> Iterator[Platform]:
             connection.execute(
                 text("""
                 CREATE TABLE IF NOT EXISTS auth.users (
-                    id uuid PRIMARY KEY, email text NOT NULL UNIQUE, email_confirmed_at timestamptz
+                    id uuid PRIMARY KEY, email text NOT NULL UNIQUE, email_confirmed_at timestamptz,
+                    encrypted_password text, invited_at timestamptz, last_sign_in_at timestamptz,
+                    raw_app_meta_data jsonb
                 )
             """)
             )
@@ -207,6 +209,25 @@ def test_admin_grants_and_revokes_individual_company_access(platform: Platform) 
         repo = Repository(connection)
         assert repo.pending_invitations(bob_email) == []
         assert not repo.accept_invitation(invite["id"], bob_email)
+
+
+def test_password_generation_revokes_preexisting_portal_sessions(platform: Platform) -> None:
+    with platform.owner.begin() as connection:
+        subject = add_auth_user(connection, email_for("password-generation", platform.suffix))
+    old_version, new_version = str(uuid4()), str(uuid4())
+    for version, pending in ((old_version, True), (new_version, False)):
+        with platform.owner.begin() as connection:
+            connection.execute(text("""
+                UPDATE auth.users SET raw_app_meta_data = jsonb_build_object(
+                    'futuranext_first_password', CAST(:pending AS boolean),
+                    'futuranext_password_version', CAST(:version AS text)
+                ) WHERE id = :subject
+            """), {"pending": pending, "version": version, "subject": subject})
+        with platform.database.session(subject, "aal2") as connection:
+            repo = Repository(connection)
+            assert not repo.password_session_current(None)
+            assert not repo.password_session_current(old_version)
+            assert repo.password_session_current(new_version) == (not pending)
 
 
 def test_seeded_tools_and_whatsapp_offer_activation(platform: Platform) -> None:

@@ -1,4 +1,5 @@
 import {api, ApiError, auth, session} from './client.js';
+import {requireFirstPassword} from './first-password.js';
 import {hasVerifiedSession, requireMfa} from './mfa.js';
 import {button, element, link, notice, runAction, screen, statusMessage, UserMessage} from './ui.js';
 
@@ -52,6 +53,8 @@ export async function boot(area, render) {
     });
 
     header(null, area, login);
+    if (await requireFirstPassword(screen, login)) return;
+
     if (!await hasVerifiedSession()) {
       await requireMfa(screen);
       return;

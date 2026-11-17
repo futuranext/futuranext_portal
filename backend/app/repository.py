@@ -34,6 +34,29 @@ class Repository:
             tenant_id=tenant_id, slug=slug, write=write,
         ))
 
+    def password_session_current(self, version: str | None) -> bool:
+        return bool(self._scalar(
+            "SELECT futuranext.password_session_current(:version)", version=version,
+        ))
+
+    def lock_password_account(self, email: str) -> bool:
+        return bool(self._scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(lower(:email), 8008))",
+            email=email,
+        ))
+
+    def find_temporary_account(self, tenant_id: UUID, email: str) -> UUID | None:
+        return self._scalar(
+            "SELECT futuranext.find_temporary_account(:tenant_id, :email)",
+            tenant_id=tenant_id, email=email,
+        )
+
+    def link_temporary_account(self, user_id: UUID, tenant_id: UUID, role: str) -> bool:
+        return bool(self._scalar(
+            "SELECT futuranext.link_temporary_account(:user_id, :tenant_id, :role)",
+            user_id=user_id, tenant_id=tenant_id, role=role,
+        ))
+
     def context(self) -> Record:
         return {
             "platform_role": self._scalar("SELECT futuranext.platform_role()"),

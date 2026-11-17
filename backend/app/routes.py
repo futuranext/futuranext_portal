@@ -4,12 +4,47 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from . import schemas as s
-from .auth import AuthUnavailable, InvalidSession
-from .dependencies import Auth, CurrentUser, Data, require_permission, tenant_repository
+from .auth import AuthUnavailable, InvalidSession, PasswordActionRejected
+from .dependencies import (
+    Auth,
+    AuthenticatedSession,
+    CurrentUser,
+    Data,
+    require_permission,
+    tenant_repository,
+)
 from .repository import Repository
 
 router = APIRouter(prefix="/api/v1")
 admin = APIRouter(prefix="/admin", tags=["Administração"])
+
+
+@router.get("/auth/first-password", response_model=s.FirstPasswordStatus, tags=["Conta"])
+def first_password_status(identity: AuthenticatedSession):
+    return s.FirstPasswordStatus(required=identity.first_password_required)
+
+
+@router.put("/auth/first-password", status_code=204, tags=["Conta"])
+def change_first_password(
+    payload: s.FirstPasswordChange, identity: AuthenticatedSession, database: Data, auth: Auth,
+):
+    if not identity.first_password_required or not identity.email or not identity.password_version:
+        raise HTTPException(409, "Não há uma troca de senha temporária pendente nesta sessão.")
+    with database.session(identity.user_id, identity.aal) as connection:
+        if not Repository(connection).lock_password_account(identity.email):
+            raise HTTPException(409, "Há uma alteração em andamento. Tente novamente.")
+        try:
+            auth.complete_first_password(
+                identity, payload.temporary_password.get_secret_value(),
+                payload.new_password.get_secret_value(),
+            )
+        except PasswordActionRejected as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+        except InvalidSession as exc:
+            raise HTTPException(401, "Entre novamente na sua conta.") from exc
+        except AuthUnavailable as exc:
+            raise HTTPException(503, "Autenticação indisponível.") from exc
+    return Response(status_code=204)
 
 
 @router.get("/auth/context", response_model=s.Context, tags=["Conta"])
@@ -162,6 +197,33 @@ def invite_tenant_user(
     delivery = auth.send_invitation(payload.email, f"{frontend_url}/ativar-conta")
     with tenant_repository(database, identity, tenant_id) as repo:
         return repo.record_invitation_delivery(invitation["id"], delivery) or invitation
+
+
+@admin.post("/clients/{tenant_id}/users/temporary", response_model=s.Member, status_code=201)
+def provision_temporary_member(
+    tenant_id: UUID, payload: s.TemporaryMember,
+    identity: CurrentUser, database: Data, auth: Auth,
+):
+    email = payload.email.lower()
+    with tenant_repository(database, identity) as repo:
+        require_permission(repo, "admin.tenant.manage")
+        organization = resource(repo.get_organization(tenant_id))
+        if not organization["active"]:
+            raise HTTPException(409, "Reative a empresa antes de cadastrar usuários.")
+        if not repo.lock_password_account(email):
+            raise HTTPException(409, "Há uma alteração em andamento. Tente novamente.")
+        candidate = repo.find_temporary_account(tenant_id, email)
+        try:
+            user_id = auth.provision_temporary_password(
+                email, payload.temporary_password.get_secret_value(), tenant_id, existing=candidate,
+            )
+        except PasswordActionRejected as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+        except AuthUnavailable as exc:
+            raise HTTPException(503, "Autenticação indisponível.") from exc
+        if not repo.link_temporary_account(user_id, tenant_id, payload.role):
+            raise HTTPException(409, "Não foi possível vincular a conta. Confira a empresa e tente novamente.")
+    return s.Member(user_id=user_id, email=email, role=payload.role, active=True)
 
 
 @admin.patch("/clients/{tenant_id}/users/{user_id}", response_model=s.Member)
