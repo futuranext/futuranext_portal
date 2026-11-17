@@ -1,8 +1,10 @@
+import re
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import (
+    AfterValidator,
     AwareDatetime,
     BaseModel,
     ConfigDict,
@@ -13,6 +15,7 @@ from pydantic import (
 )
 
 from .auth import Delivery
+from .modules.fiscal_schema import normalize_cnpj
 
 ClientRole = Literal["cliente_admin", "cliente_usuario"]
 PlatformRole = Literal["super_admin", "suporte"]
@@ -21,6 +24,39 @@ Slug = Annotated[str, StringConstraints(min_length=2, max_length=63, pattern=r"^
 Description = Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)]
 Email = Annotated[str, StringConstraints(strip_whitespace=True, min_length=3, max_length=254,
                                          pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")]
+
+
+def normalize_document(value: str) -> str:
+    """CPF ou CNPJ (numérico ou alfanumérico) com dígitos verificadores."""
+    compact = re.sub(r"[./\s-]", "", value).upper()
+    if len(compact) != 11:
+        return normalize_cnpj(compact)
+    if not compact.isdigit() or len(set(compact)) == 1:
+        raise ValueError("Informe um CPF ou CNPJ válido.")
+    body = compact[:9]
+    for size in (10, 11):
+        remainder = sum(int(digit) * weight for digit, weight in zip(body, range(size, 1, -1))) * 10 % 11
+        body += str(remainder % 10)
+    if body != compact:
+        raise ValueError("Os dígitos verificadores do CPF não conferem.")
+    return compact
+
+
+def normalize_phone(value: str) -> str:
+    """Telefone brasileiro com DDD, aceitando +55 e formatação."""
+    digits = re.sub(r"[\s().+-]", "", value)
+    if len(digits) in {12, 13} and digits.startswith("55"):
+        digits = digits[2:]
+    if not re.fullmatch(r"[1-9][0-9]{9,10}", digits) or (len(digits) == 11 and digits[2] != "9"):
+        raise ValueError("Informe o telefone com DDD, por exemplo (11) 91234-5678.")
+    return digits
+
+
+Document = Annotated[str, StringConstraints(strip_whitespace=True, min_length=11, max_length=24),
+                     AfterValidator(normalize_document)]
+Phone = Annotated[str, StringConstraints(strip_whitespace=True, min_length=10, max_length=24),
+                  AfterValidator(normalize_phone)]
+BillingEmail = Annotated[Email, AfterValidator(str.lower)]
 
 
 def validate_password(value: SecretStr) -> SecretStr:
@@ -34,7 +70,15 @@ class Input(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ClientCreate(Input):
+class ClientBilling(Input):
+    """Campos exigidos pelo Asaas para criar o cliente de cobrança."""
+
+    document: Document
+    billing_email: BillingEmail
+    billing_phone: Phone
+
+
+class ClientCreate(ClientBilling):
     name: Name
     slug: Slug
 
@@ -68,9 +112,14 @@ class FirstPasswordStatus(BaseModel):
     required: bool
 
 
-class ClientUpdate(Input):
+class ClientUpdate(ClientBilling):
     name: Name
     active: bool
+
+
+BillingCustomerStatus = Literal[
+    "linked", "incomplete", "no_access", "inactive", "unavailable", "rejected", "failed", "busy",
+]
 
 
 class Client(BaseModel):
@@ -78,6 +127,10 @@ class Client(BaseModel):
     name: str
     slug: str
     active: bool
+    document: str | None = None
+    billing_email: str | None = None
+    billing_phone: str | None = None
+    billing_customer: BillingCustomerStatus | None = None
 
 
 class MembershipContext(BaseModel):

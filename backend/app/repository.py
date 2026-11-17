@@ -91,7 +91,7 @@ class Repository:
 
     def list_organizations(self) -> list[Record]:
         return self._rows("""
-            SELECT id, name, slug, active
+            SELECT id, name, slug, active, document, billing_email, billing_phone
             FROM futuranext.organizations ORDER BY name, id
         """)
 
@@ -103,22 +103,34 @@ class Repository:
             tenant_id=tenant_id,
         )
 
-    def create_organization(self, name: str, slug: str) -> Record | None:
+    def create_organization(
+        self, name: str, slug: str, *, document: str | None = None,
+        billing_email: str | None = None, billing_phone: str | None = None,
+    ) -> Record | None:
         return self._one(
             """
-            INSERT INTO futuranext.organizations (name, slug) VALUES (:name, :slug)
-            RETURNING id, name, slug, active
+            INSERT INTO futuranext.organizations (name, slug, document, billing_email, billing_phone)
+            VALUES (:name, :slug, :document, :billing_email, :billing_phone)
+            RETURNING id, name, slug, active, document, billing_email, billing_phone
         """,
-            name=name,
-            slug=slug,
+            name=name, slug=slug, document=document,
+            billing_email=billing_email, billing_phone=billing_phone,
         )
 
-    def update_organization(self, tenant_id: UUID, name: str, active: bool) -> Record | None:
+    def update_organization(
+        self, tenant_id: UUID, name: str, active: bool, *, document: str | None = None,
+        billing_email: str | None = None, billing_phone: str | None = None,
+    ) -> Record | None:
         return self._one(
             """
-            UPDATE futuranext.organizations SET name = :name, active = :active WHERE id = :tenant_id
-            RETURNING id, name, slug, active
+            UPDATE futuranext.organizations SET name = :name, active = :active,
+                document = coalesce(:document, document),
+                billing_email = coalesce(:billing_email, billing_email),
+                billing_phone = coalesce(:billing_phone, billing_phone)
+            WHERE id = :tenant_id
+            RETURNING id, name, slug, active, document, billing_email, billing_phone
         """,
+            document=document, billing_email=billing_email, billing_phone=billing_phone,
             tenant_id=tenant_id,
             name=name,
             active=active,

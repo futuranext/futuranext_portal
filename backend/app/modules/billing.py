@@ -9,8 +9,15 @@ from sqlalchemy import text
 
 from ..dependencies import CurrentUser, Data, require_permission, tenant_repository
 from ..repository import Record
-from ..schemas import Input, Name
-from .asaas import AsaasCharge, AsaasClient, AsaasError, AsaasRejected, ChargeRequest
+from ..schemas import BillingCustomerStatus, Input, Name
+from .asaas import (
+    AsaasCharge,
+    AsaasClient,
+    AsaasError,
+    AsaasRejected,
+    ChargeRequest,
+    CustomerRequest,
+)
 from .billing_repository import BillingRepository
 
 router = APIRouter(prefix="/api/v1", tags=["Cobranças"])
@@ -20,6 +27,17 @@ InvoiceStatus = Literal[
 ]
 CUSTOMER_PATTERN = r"^cus_[a-zA-Z0-9_-]{1,120}$"
 REFERENCE_PREFIX = "futuranext:invoice:"
+CUSTOMER_REFERENCE_PREFIX = "futuranext:tenant:"
+CUSTOMER_MESSAGES: dict[str, str] = {
+    "linked": "Cliente Asaas vinculado.",
+    "incomplete": "Complete CPF/CNPJ, e-mail e telefone no cadastro da empresa.",
+    "no_access": "O cliente Asaas será criado quando a empresa tiver um usuário com acesso ativo.",
+    "inactive": "Reative a empresa para criar o cliente Asaas.",
+    "unavailable": "Integração Asaas não configurada neste ambiente.",
+    "rejected": "O Asaas recusou os dados do cliente. Confira CPF/CNPJ, e-mail e telefone.",
+    "failed": "Não foi possível criar o cliente no Asaas agora. Tente novamente em instantes.",
+    "busy": "O cliente Asaas está sendo criado. Atualize em instantes.",
+}
 STATUS = {
     "PENDING": "open",
     "RECEIVED": "paid",
@@ -82,12 +100,15 @@ class Invoice(BaseModel):
 
 class PortalBilling(BaseModel):
     payment_available: bool
+    customer_ready: bool = False
     invoices: list[Invoice]
 
 
 class AdminBilling(PortalBilling):
     environment: BillingEnvironment
     account: Account | None
+    customer_status: BillingCustomerStatus
+    customer_message: str
     services: list[Service]
     webhook_configured: bool
 
@@ -151,6 +172,87 @@ def billing_admin(repo: BillingRepository, tenant_id: UUID) -> None:
     found(repo.get_organization(tenant_id))
 
 
+def customer_request(tenant_id: UUID, profile: Record) -> CustomerRequest:
+    return CustomerRequest(
+        name=profile["name"], cpf_cnpj=profile["document"], email=profile["billing_email"],
+        phone=profile["billing_phone"], external_reference=CUSTOMER_REFERENCE_PREFIX + str(tenant_id),
+    )
+
+
+def complete_profile(profile: Record | None) -> bool:
+    return bool(
+        profile and profile["document"] and profile["billing_email"] and profile["billing_phone"]
+    )
+
+
+def sync_customer(
+    billing: BillingRepository, tenant_id: UUID, provider: AsaasClient | None, mode: str,
+    *, as_member: bool = False,
+) -> BillingCustomerStatus:
+    """Cria ou localiza o cliente Asaas da empresa e grava o vínculo no ambiente atual.
+
+    Regra: empresa ativa, com CPF/CNPJ, e-mail e telefone, e pelo menos um usuário com acesso.
+    A referência externa da empresa torna a operação repetível sem duplicar clientes.
+    """
+    account = billing.account(tenant_id)
+    if account and account["environment"] == mode:
+        return "linked"
+    if account and as_member:
+        # Troca de ambiente exige revisão administrativa do vínculo existente.
+        return "failed"
+    profile = billing.customer_profile(tenant_id)
+    if profile is None or not profile["active"]:
+        return "inactive"
+    if not complete_profile(profile):
+        return "incomplete"
+    if not as_member and not billing.has_active_member(tenant_id):
+        return "no_access"
+    if provider is None:
+        return "unavailable"
+    if not billing.try_lock_customer(tenant_id):
+        return "busy"
+    account = billing.account(tenant_id)
+    if account and account["environment"] == mode:
+        return "linked"
+    request = customer_request(tenant_id, profile)
+    try:
+        customer = provider.find_customer(request.external_reference)
+        if customer is None:
+            customer = provider.create_customer(request)
+        if not customer.notification_disabled:
+            customer = provider.disable_notifications(customer.id)
+    except AsaasRejected:
+        return "rejected"
+    except AsaasError:
+        return "failed"
+    if as_member:
+        billing.link_customer_as_member(tenant_id, customer.id, mode)
+    else:
+        billing.save_account(tenant_id, customer.id, mode)
+    return "linked"
+
+
+def push_customer(
+    billing: BillingRepository, tenant_id: UUID, provider: AsaasClient | None, mode: str,
+) -> BillingCustomerStatus:
+    """Atualiza no Asaas o cliente já vinculado ou cria o vínculo quando a empresa é elegível."""
+    account = billing.account(tenant_id)
+    if not account or account["environment"] != mode:
+        return sync_customer(billing, tenant_id, provider, mode)
+    profile = billing.customer_profile(tenant_id)
+    if not complete_profile(profile):
+        return "incomplete"
+    if provider is None:
+        return "linked"
+    try:
+        provider.update_customer(account["customer_id"], customer_request(tenant_id, profile))
+    except AsaasRejected:
+        return "rejected"
+    except AsaasError:
+        return "failed"
+    return "linked"
+
+
 def reference(invoice_id: UUID) -> str:
     return REFERENCE_PREFIX + str(invoice_id)
 
@@ -199,9 +301,12 @@ def admin_billing(tenant_id: UUID, identity: CurrentUser, database: Data, reques
     with tenant_repository(database, identity, tenant_id) as repo:
         billing = BillingRepository(repo.connection)
         billing_admin(billing, tenant_id)
+        status = sync_customer(billing, tenant_id, provider, mode)
         account = billing.account(tenant_id)
         return AdminBilling(
             environment=mode, account=Account(**account) if account else None,
+            customer_status=status, customer_message=CUSTOMER_MESSAGES[status],
+            customer_ready=status == "linked",
             payment_available=provider is not None,
             webhook_configured=bool(provider and provider.config.webhook_token),
             services=[Service(**row) for row in billing.services(tenant_id)],
@@ -211,12 +316,32 @@ def admin_billing(tenant_id: UUID, identity: CurrentUser, database: Data, reques
 
 @router.put("/admin/clients/{tenant_id}/billing/account", response_model=Account)
 def save_account(
-    tenant_id: UUID, payload: AccountInput, identity: CurrentUser, database: Data, request: Request,
+    tenant_id: UUID, payload: AccountInput, identity: CurrentUser, database: Data,
+    request: Request, provider: Asaas,
 ):
     with tenant_repository(database, identity, tenant_id) as repo:
         billing = BillingRepository(repo.connection)
         billing_admin(billing, tenant_id)
+        if provider is not None:
+            # Vínculo manual de cliente existente: confirma o ID e desliga as notificações pagas.
+            try:
+                customer = provider.get_customer(payload.customer_id)
+                if customer.deleted:
+                    raise AsaasRejected("Cliente removido no Asaas.")
+                if not customer.notification_disabled:
+                    provider.disable_notifications(customer.id)
+            except AsaasRejected as exc:
+                raise HTTPException(422, "Cliente não encontrado neste ambiente do Asaas.") from exc
+            except AsaasError as exc:
+                raise HTTPException(503, "Não foi possível confirmar o cliente no Asaas.") from exc
         return billing.save_account(tenant_id, payload.customer_id, environment(request))
+
+
+@router.post("/admin/clients/{tenant_id}/billing/account/sync", response_model=AdminBilling)
+def sync_account(
+    tenant_id: UUID, identity: CurrentUser, database: Data, request: Request, provider: Asaas,
+):
+    return admin_billing(tenant_id, identity, database, request, provider)
 
 
 @router.post("/admin/clients/{tenant_id}/billing/services", response_model=Service, status_code=201)
@@ -247,6 +372,7 @@ def issue_invoice(
     with tenant_repository(database, identity, tenant_id) as repo:
         billing = BillingRepository(repo.connection)
         billing_admin(billing, tenant_id)
+        sync_customer(billing, tenant_id, request.app.state.asaas, mode)
         invoice = billing.issue_invoice(
             tenant_id, date.fromisoformat(payload.period + "-01"), payload.due_date, mode,
         )
@@ -290,10 +416,13 @@ def portal_billing(tenant_id: UUID, identity: CurrentUser, database: Data, reque
     mode = environment(request)
     with tenant_repository(database, identity, tenant_id) as repo:
         require_permission(repo, "tenant.access", status=404)
-        sources = BillingRepository(repo.connection).invoices(tenant_id)
+        billing = BillingRepository(repo.connection)
+        # O acesso do próprio cliente ao portal atende a regra de "usuário com acesso".
+        status = sync_customer(billing, tenant_id, provider, mode, as_member=True)
         return PortalBilling(
             payment_available=provider is not None,
-            invoices=[invoice_view(row, mode) for row in sources],
+            customer_ready=status == "linked",
+            invoices=[invoice_view(row, mode) for row in billing.invoices(tenant_id)],
         )
 
 

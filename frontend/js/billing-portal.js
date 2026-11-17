@@ -111,6 +111,9 @@ export async function renderBillingPortal(target, {tenant, signal, canPay = true
 
   target.replaceChildren(panel('Cobranças da empresa',
     canPay ? muted('Escolha boleto, Pix ou cartão de crédito na página de pagamento do Asaas.') : null,
+    canPay && model.payment_available && !model.customer_ready
+      ? muted('O cadastro de pagamento da empresa está em preparação. Caso persista, fale com a FuturaNext.')
+      : null,
     element('div', {class: 'form-actions'}, refresh), status, list,
   ));
   draw();

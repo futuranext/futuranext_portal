@@ -36,29 +36,42 @@ function serviceForm(service, mutate) {
   });
 }
 
-function accountPanel(model, save) {
+function accountPanel(model, save, sync) {
   const configured = element('p', {class: 'muted'});
-  function updateStatus() {
-    if (!model.account) configured.textContent = 'Vincule o cliente para disponibilizar o pagamento online.';
-    else if (model.account.environment !== model.environment) {
-      configured.textContent = `O cliente atual está vinculado ao ambiente ${environments[model.account.environment]}.`;
-    } else configured.textContent = 'Cliente Asaas vinculado.';
-  }
-  updateStatus();
+  const syncStatus = statusMessage();
   const customer = inputField('ID do cliente no Asaas', 'customer_id', {
     value: model.account?.customer_id, placeholder: 'cus_…', maxlength: 124, pattern: 'cus_[a-zA-Z0-9_\\-]{1,120}',
     required: true, spellcheck: 'false', autocapitalize: 'none',
-  }, 'Use o identificador do cliente neste ambiente do Asaas.');
-  const accountForm = actionForm([customer], 'Salvar vínculo', async (data) => {
+  }, 'Preenchido automaticamente. Informe manualmente apenas para reaproveitar um cliente já existente no Asaas.');
+  const createNow = button('Criar cliente no Asaas agora', true);
+
+  function updateStatus() {
+    if (model.account?.environment === model.environment) {
+      configured.textContent = `Cliente Asaas vinculado · ${model.account.customer_id}. Notificações pagas de e-mail e SMS desativadas.`;
+    } else if (model.account) {
+      configured.textContent = `O cliente atual está vinculado ao ambiente ${environments[model.account.environment]}. ${model.customer_message}`;
+    } else configured.textContent = model.customer_message;
+    customer.querySelector('input').value = model.account?.customer_id ?? '';
+    createNow.hidden = model.customer_status === 'linked';
+  }
+  updateStatus();
+
+  createNow.addEventListener('click', runAction(createNow, syncStatus, async () => {
+    await sync();
+    updateStatus();
+    return model.customer_status === 'linked' ? 'Cliente Asaas vinculado.' : model.customer_message;
+  }));
+  const accountForm = actionForm([customer], 'Salvar vínculo manual', async (data) => {
     await save(data.get('customer_id').trim());
     updateStatus();
     return 'Vínculo atualizado.';
   });
   return panel('Cliente Asaas', muted(`Ambiente atual · ${environments[model.environment]}`), configured,
+    element('div', {class: 'form-actions'}, createNow), syncStatus,
     model.payment_available && model.webhook_configured === false
       ? muted('Configure o webhook do Asaas para receber os estados automaticamente. Por enquanto, use Atualizar situação.')
       : null,
-    accountForm);
+    element('details', {class: 'edit-disclosure'}, element('summary', {}, 'Vincular cliente existente'), accountForm));
 }
 
 async function companyBilling(target, tenant, signal) {
@@ -91,7 +104,7 @@ async function companyBilling(target, tenant, signal) {
   function updateSummary() {
     const included = model.services.filter(({active}) => active);
     let requirement;
-    if (model.account?.environment !== model.environment) requirement = 'Vincule o cliente Asaas no ambiente atual para gerar a cobrança.';
+    if (model.account?.environment !== model.environment) requirement = `Cliente Asaas pendente: ${model.customer_message}`;
     else if (!included.length) requirement = 'Cadastre um serviço ativo para gerar a cobrança.';
     else if (included.length > 100) requirement = 'Mantenha até 100 serviços ativos por cobrança.';
     newInvoice.hidden = Boolean(requirement);
@@ -166,7 +179,13 @@ async function companyBilling(target, tenant, signal) {
   const connection = accountPanel(model, async (customerId) => {
     if (!customerId) throw new UserMessage('Informe o ID do cliente no Asaas.');
     model.account = await api(`${base}/account`, {method: 'PUT', body: {customer_id: customerId}, signal});
+    model.customer_status = model.account.environment === model.environment ? 'linked' : model.customer_status;
     if (!signal.aborted) updateSummary();
+  }, async () => {
+    const latest = await api(`${base}/account/sync`, {method: 'POST', signal});
+    if (signal.aborted) return;
+    Object.assign(model, {account: latest.account, customer_status: latest.customer_status, customer_message: latest.customer_message});
+    updateSummary();
   });
   updateSummary();
   showInvoices();

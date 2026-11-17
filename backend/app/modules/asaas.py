@@ -98,6 +98,25 @@ class AsaasCharge:
     original_amount_cents: int | None = None
 
 
+@dataclass(frozen=True)
+class CustomerRequest:
+    """Cliente Asaas da empresa. Notificações pagas do Asaas ficam sempre desativadas."""
+
+    name: str
+    cpf_cnpj: str
+    email: str
+    phone: str
+    external_reference: str
+
+
+@dataclass(frozen=True)
+class AsaasCustomer:
+    id: str
+    external_reference: str | None
+    notification_disabled: bool
+    deleted: bool = False
+
+
 def _amount_cents(value: object) -> int:
     if type(value) not in {int, Decimal}:
         raise ValueError
@@ -127,6 +146,21 @@ def hosted_invoice_url(value: object, environment: AsaasEnvironment) -> str | No
     except ValueError:
         return None
     return f"https://{hostname}{url.path}"
+
+
+def _customer_payload(request: CustomerRequest) -> dict:
+    phone = request.phone
+    payload = {
+        "name": request.name.strip()[:120],
+        "cpfCnpj": request.cpf_cnpj,
+        "email": request.email,
+        "externalReference": request.external_reference,
+        # Não marcar "Enviar notificação de cobrança por e-mail e SMS": o recurso tem custo extra.
+        "notificationDisabled": True,
+    }
+    # Celular tem 11 dígitos com o nono dígito; os demais seguem como telefone fixo.
+    payload["mobilePhone" if len(phone) == 11 else "phone"] = phone
+    return payload
 
 
 def _check_reference(customer: str, reference: str) -> None:
@@ -229,6 +263,88 @@ class AsaasClient:
                 "O identificador retornado diverge da cobrança solicitada."
             )
         return charge
+
+    def create_customer(self, request: CustomerRequest) -> AsaasCustomer:
+        """Cria o cliente com notificationDisabled=true (notificações por e-mail/SMS são pagas)."""
+        if not REFERENCE.fullmatch(request.external_reference):
+            raise AsaasRejected("Referência do cliente inválida.")
+        customer = self._customer(
+            self._request("POST", "/customers", json=_customer_payload(request))
+        )
+        if customer.external_reference != request.external_reference or customer.deleted:
+            raise AsaasUncertainCreation(
+                "Não foi possível confirmar o cliente criado. Concilie a referência no Asaas."
+            )
+        return customer
+
+    def update_customer(self, customer_id: str, request: CustomerRequest) -> AsaasCustomer:
+        if not CUSTOMER_ID.fullmatch(customer_id):
+            raise AsaasRejected("Identificador de cliente Asaas inválido.")
+        payload = _customer_payload(request)
+        payload.pop("externalReference")
+        customer = self._customer(self._request("POST", f"/customers/{customer_id}", json=payload))
+        if customer.id != customer_id:
+            raise AsaasReconciliationError("O identificador retornado diverge do cliente.")
+        return customer
+
+    def find_customer(self, external_reference: str) -> AsaasCustomer | None:
+        if not REFERENCE.fullmatch(external_reference):
+            raise AsaasRejected("Referência do cliente inválida.")
+        page = self._request(
+            "GET", "/customers",
+            params={"externalReference": external_reference, "offset": 0, "limit": 2},
+        )
+        results = page.get("data")
+        if not isinstance(results, list) or type(page.get("hasMore")) is not bool:
+            raise AsaasReconciliationError("Listagem de clientes do Asaas inválida.")
+        customers = [
+            item for item in (self._customer(result) for result in results) if not item.deleted
+        ]
+        if page["hasMore"] or len(customers) > 1:
+            raise AsaasReconciliationError("Há mais de um cliente Asaas para a mesma empresa.")
+        if not customers:
+            return None
+        if customers[0].external_reference != external_reference:
+            raise AsaasReconciliationError("O cliente retornado não corresponde à empresa.")
+        return customers[0]
+
+    def get_customer(self, customer_id: str) -> AsaasCustomer:
+        if not CUSTOMER_ID.fullmatch(customer_id):
+            raise AsaasRejected("Identificador de cliente Asaas inválido.")
+        customer = self._customer(self._request("GET", f"/customers/{customer_id}"))
+        if customer.id != customer_id:
+            raise AsaasReconciliationError("O identificador retornado diverge do cliente.")
+        return customer
+
+    def disable_notifications(self, customer_id: str) -> AsaasCustomer:
+        if not CUSTOMER_ID.fullmatch(customer_id):
+            raise AsaasRejected("Identificador de cliente Asaas inválido.")
+        customer = self._customer(self._request(
+            "POST", f"/customers/{customer_id}", json={"notificationDisabled": True},
+        ))
+        if customer.id != customer_id or not customer.notification_disabled:
+            raise AsaasReconciliationError("O Asaas não confirmou a desativação das notificações.")
+        return customer
+
+    def _customer(self, data: object) -> AsaasCustomer:
+        try:
+            if not isinstance(data, dict):
+                raise TypeError
+            customer_id = data["id"]
+            reference = data.get("externalReference")
+            disabled = data.get("notificationDisabled", False)
+            deleted = data.get("deleted", False)
+            if (
+                not isinstance(customer_id, str) or not CUSTOMER_ID.fullmatch(customer_id)
+                or (reference is not None and not isinstance(reference, str))
+                or type(disabled) is not bool or type(deleted) is not bool
+            ):
+                raise ValueError
+            return AsaasCustomer(customer_id, reference, disabled, deleted)
+        except (TypeError, KeyError, ValueError):
+            raise AsaasReconciliationError(
+                "Os dados do cliente retornado pelo Asaas são inválidos."
+            ) from None
 
     def _request(self, method: str, path: str, **options) -> dict:
         creating = method == "POST"

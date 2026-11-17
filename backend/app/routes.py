@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from sqlalchemy.exc import SQLAlchemyError
 
 from . import schemas as s
 from .auth import AuthUnavailable, InvalidSession, PasswordActionRejected
@@ -13,10 +14,28 @@ from .dependencies import (
     require_permission,
     tenant_repository,
 )
+from .modules.billing import push_customer, sync_customer
+from .modules.billing_repository import BillingRepository
 from .repository import Repository
 
 router = APIRouter(prefix="/api/v1")
 admin = APIRouter(prefix="/admin", tags=["Administração"])
+
+
+def billing_customer(
+    database: Data, identity: CurrentUser, tenant_id: UUID, request: Request, *, push: bool = False,
+) -> s.BillingCustomerStatus:
+    """Cria/atualiza o cliente Asaas depois do commit do cadastro, sem desfazer o cadastro."""
+    try:
+        with tenant_repository(database, identity, tenant_id) as repo:
+            billing = BillingRepository(repo.connection)
+            operation = push_customer if push else sync_customer
+            return operation(
+                billing, tenant_id, request.app.state.asaas,
+                request.app.state.settings.asaas_environment,
+            )
+    except SQLAlchemyError:
+        return "failed"
 
 
 @router.get("/auth/first-password", response_model=s.FirstPasswordStatus, tags=["Conta"])
@@ -97,14 +116,26 @@ def list_clients(identity: CurrentUser, database: Data):
 def create_client(payload: s.ClientCreate, identity: CurrentUser, database: Data):
     with tenant_repository(database, identity) as repo:
         require_permission(repo, "admin.tenant.manage")
-        return repo.create_organization(payload.name, payload.slug)
+        created = resource(repo.create_organization(
+            payload.name, payload.slug, document=payload.document,
+            billing_email=payload.billing_email, billing_phone=payload.billing_phone,
+        ))
+    # Empresa nova ainda não tem usuários: o cliente Asaas é criado no primeiro acesso.
+    return {**created, "billing_customer": "no_access"}
 
 
 @admin.patch("/clients/{tenant_id}", response_model=s.Client)
-def update_client(tenant_id: UUID, payload: s.ClientUpdate, identity: CurrentUser, database: Data):
+def update_client(
+    tenant_id: UUID, payload: s.ClientUpdate, identity: CurrentUser, database: Data, request: Request,
+):
     with tenant_repository(database, identity, tenant_id) as repo:
         require_permission(repo, "admin.tenant.manage")
-        return resource(repo.update_organization(tenant_id, payload.name, payload.active))
+        updated = resource(repo.update_organization(
+            tenant_id, payload.name, payload.active, document=payload.document,
+            billing_email=payload.billing_email, billing_phone=payload.billing_phone,
+        ))
+    status = billing_customer(database, identity, tenant_id, request, push=True)
+    return {**updated, "billing_customer": status}
 
 
 @admin.get("/products", response_model=list[s.AdminProduct])
@@ -233,6 +264,9 @@ def provision_temporary_member(
             raise HTTPException(503, "Autenticação indisponível.") from exc
         if not repo.link_temporary_account(user_id, tenant_id, payload.role):
             raise HTTPException(409, "Não foi possível vincular a conta. Confira a empresa e tente novamente.")
+
+    # Com o primeiro acesso liberado, a empresa passa a ter o cliente Asaas.
+    billing_customer(database, identity, tenant_id, request)
 
     # O e-mail só é enviado depois que o vínculo está confirmado no banco.
     mailer = request.app.state.first_access_mailer

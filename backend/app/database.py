@@ -52,7 +52,7 @@ class Database:
                         text("""
                     SELECT current_user = 'fn_app'
                        AND row_security_active('futuranext.organizations')
-                       AND version_num = '0010_user_deletion'
+                       AND version_num = '0011_billing_customer'
                     FROM futuranext_meta.alembic_version
                 """)
                     )

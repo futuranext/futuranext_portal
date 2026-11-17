@@ -9,6 +9,7 @@ import httpx
 import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from test_postgres import Platform
 from test_postgres import platform as postgres_platform  # noqa: F401
 
@@ -25,14 +26,42 @@ class SimulatedAsaas:
     def __init__(self):
         self.charges = {}
         self.created = []
+        self.customers = {}
+        self.customer_posts = []
+        self.customer_updates = []
         self.reads = 0
         self.timeout_after_charge = False
         self.suffix = uuid4().hex[:8]
         self.released = Event()
         self.started = Event()
 
+    def customer(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "POST" and path == "/v3/customers":
+            data = json.loads(request.content)
+            customer = {**data, "id": f"cus_auto_{self.suffix}_{len(self.customer_posts) + 1}",
+                        "deleted": False}
+            self.customer_posts.append(data)
+            self.customers[customer["id"]] = customer
+            return httpx.Response(200, json=customer)
+        if path == "/v3/customers":
+            reference = request.url.params.get("externalReference")
+            data = [item for item in self.customers.values() if item.get("externalReference") == reference]
+            return httpx.Response(200, json={"hasMore": False, "data": data})
+        customer_id = path.rsplit("/", 1)[-1]
+        # IDs vinculados manualmente nos testes já existem no Asaas, com notificações ativas.
+        customer = self.customers.setdefault(customer_id, {
+            "id": customer_id, "notificationDisabled": False, "deleted": False,
+        })
+        if request.method == "POST":
+            self.customer_updates.append(json.loads(request.content))
+            customer.update(json.loads(request.content))
+        return httpx.Response(200, json=customer)
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         assert request.url.host == "api-sandbox.asaas.com"
+        if request.url.path.startswith("/v3/customers"):
+            return self.customer(request)
         if request.method == "POST":
             data = json.loads(request.content)
             number = len(self.created) + 1
@@ -213,3 +242,61 @@ def test_ambiguous_charge_never_repeats_post_and_can_reconcile(billing: BillingF
     assert recovered.status_code == 200, recovered.text
     assert recovered.json()["payment_url"] == "https://sandbox.asaas.com/i/mock-1"
     assert len(billing.provider.created) == 1
+
+
+def test_customer_is_created_automatically_without_paid_notifications(billing: BillingFlow):
+    api, platform = billing.api, billing.platform
+    tenant = platform.tenant_b
+    admin_path = f"/api/v1/admin/clients/{tenant}/billing"
+    company = {"name": "Empresa B", "active": True}
+    with platform.owner.begin() as connection:
+        connection.execute(text("""
+            DELETE FROM futuranext.billing_accounts WHERE tenant_id = :tenant
+        """), {"tenant": tenant})
+
+    incomplete = api.get(admin_path, headers=billing.admin).json()
+    assert incomplete["customer_status"] == "incomplete" and incomplete["account"] is None
+    assert api.patch(f"/api/v1/admin/clients/{tenant}", headers=billing.admin, json={
+        **company, "document": "529.982.247-25", "billing_email": "x", "billing_phone": "11912345678",
+    }).status_code == 422
+
+    # O portal do próprio cliente também cria o vínculo quando o cadastro está completo.
+    with platform.owner.begin() as connection:
+        connection.execute(text("""
+            UPDATE futuranext.organizations SET document = '52998224725',
+                billing_email = 'financeiro@example.com', billing_phone = '11912345678'
+            WHERE id = :tenant
+        """), {"tenant": tenant})
+    portal = api.get(f"/api/v1/tenants/{tenant}/billing", headers=billing.other)
+    assert portal.status_code == 200, portal.text
+    assert portal.json()["customer_ready"] is True
+    assert billing.provider.customer_posts == [{
+        "name": "Empresa B", "cpfCnpj": "52998224725", "email": "financeiro@example.com",
+        "mobilePhone": "11912345678", "notificationDisabled": True,
+        "externalReference": f"futuranext:tenant:{tenant}",
+    }]
+
+    linked = api.get(admin_path, headers=billing.admin).json()
+    assert linked["customer_status"] == "linked"
+    assert linked["account"]["customer_id"].startswith("cus_auto_")
+    assert api.get(admin_path, headers=billing.admin).json()["account"] == linked["account"]
+    assert len(billing.provider.customer_posts) == 1
+
+    # Editar a empresa atualiza o cliente existente, sem reativar notificações pagas.
+    updated = api.patch(f"/api/v1/admin/clients/{tenant}", headers=billing.admin, json={
+        **company, "document": "11.222.333/0001-81", "billing_email": "Contas@Example.com",
+        "billing_phone": "(11) 3234-5678",
+    })
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["billing_customer"] == "linked"
+    assert billing.provider.customer_updates[-1] == {
+        "name": "Empresa B", "cpfCnpj": "11222333000181", "email": "contas@example.com",
+        "phone": "1132345678", "notificationDisabled": True,
+    }
+    assert len(billing.provider.customer_posts) == 1
+
+
+def test_manual_customer_link_disables_paid_notifications(billing: BillingFlow):
+    customer = f"cus_{billing.platform.suffix}"
+    assert billing.provider.customers[customer]["notificationDisabled"] is True
+    assert {"notificationDisabled": True} in billing.provider.customer_updates

@@ -23,6 +23,29 @@ const slugField = () => inputField('Identificador', 'slug', {
   required: true, minlength: 2, maxlength: 63, pattern: '[a-z0-9]+(?:-[a-z0-9]+)*', autocapitalize: 'none', spellcheck: 'false',
 }, 'Use letras minúsculas, números e hífens.');
 
+// Dados exigidos pelo Asaas para criar automaticamente o cliente de cobrança.
+const billingFields = (item = {}) => element('div', {class: 'form-grid'},
+  inputField('CPF ou CNPJ', 'document', {value: item.document, required: true, minlength: 11, maxlength: 24, inputmode: 'text', autocomplete: 'off'}),
+  inputField('E-mail de cobrança', 'billing_email', {type: 'email', value: item.billing_email, required: true, maxlength: 254, autocomplete: 'off'}),
+  inputField('Telefone com DDD', 'billing_phone', {type: 'tel', value: item.billing_phone, required: true, minlength: 10, maxlength: 24, placeholder: '(11) 91234-5678'}),
+);
+const billingValues = (data) => ({
+  document: data.get('document').trim(),
+  billing_email: data.get('billing_email').trim(),
+  billing_phone: data.get('billing_phone').trim(),
+});
+const customerMessages = {
+  linked: 'Cliente Asaas vinculado.',
+  no_access: 'O cliente Asaas será criado quando a empresa tiver um usuário com acesso.',
+  incomplete: 'Complete os dados de cobrança.',
+  inactive: 'Empresa inativa: o cliente Asaas não foi criado.',
+  unavailable: 'Integração Asaas não configurada neste ambiente.',
+  rejected: 'O Asaas recusou os dados. Confira CPF/CNPJ, e-mail e telefone.',
+  failed: 'Dados salvos, mas o Asaas não respondeu. Abra Cobranças para tentar novamente.',
+  busy: 'O cliente Asaas está sendo criado.',
+};
+const savedMessage = (base, status) => [base, customerMessages[status]].filter(Boolean).join(' ');
+
 const description = (text) => field('Descrição', element('textarea', {name: 'description', maxlength: 1000, rows: 3}, text));
 const activeLabel = (active) => active ? 'Ativo' : 'Inativo';
 const productFields = (item = {}) => [
@@ -48,21 +71,22 @@ async function catalog(canEdit, products) {
 
   function drawRecords() {
     list.replaceChildren(...records.map((item) => {
-      const title = () => `${item.name} · ${item.slug} · ${activeLabel(item.active)}`;
+      const pending = () => !products && !(item.document && item.billing_email && item.billing_phone) ? ' · Dados de cobrança pendentes' : '';
+      const title = () => `${item.name} · ${item.slug} · ${activeLabel(item.active)}${pending()}`;
       if (!canEdit) return muted(title());
 
       const summary = element('summary', {}, title());
       const form = actionForm([
         nameField(item.name),
-        ...(products ? productFields(item) : []),
+        ...(products ? productFields(item) : [billingFields(item)]),
         checkField(products ? 'Produto ativo' : 'Empresa ativa', 'active', item.active),
       ].filter(Boolean), `Salvar ${label}`, async (data) => {
         const body = {name: data.get('name').trim(), active: data.has('active')};
-        if (products) Object.assign(body, productValues(data));
-        await api(`${path}/${resource(item.id)}`, {method: 'PATCH', body});
-        Object.assign(item, body);
+        Object.assign(body, products ? productValues(data) : billingValues(data));
+        const saved = await api(`${path}/${resource(item.id)}`, {method: 'PATCH', body});
+        Object.assign(item, body, saved);
         summary.textContent = title();
-        return 'Alterações salvas.';
+        return savedMessage('Alterações salvas.', saved.billing_customer);
       });
       return element('details', {class: 'edit-disclosure'}, summary, form);
     }));
@@ -72,14 +96,14 @@ async function catalog(canEdit, products) {
   drawRecords();
   const create = canEdit ? panel(products ? 'Novo produto' : 'Nova empresa', actionForm([
     element('div', {class: 'form-grid'}, nameField(), slugField()),
-    ...(products ? productFields() : []),
+    ...(products ? productFields() : [billingFields()]),
   ].filter(Boolean), `Cadastrar ${label}`, async (data, form) => {
     const body = {name: data.get('name').trim(), slug: data.get('slug')};
-    if (products) Object.assign(body, productValues(data));
+    Object.assign(body, products ? productValues(data) : billingValues(data));
     records.unshift(await api(path, {method: 'POST', body}));
     drawRecords();
     form.reset();
-    return products ? 'Produto cadastrado.' : 'Empresa cadastrada.';
+    return products ? 'Produto cadastrado.' : savedMessage('Empresa cadastrada.', records[0].billing_customer);
   })) : null;
 
   screen.replaceChildren(...[create, panel(products ? 'Produtos cadastrados' : 'Empresas disponíveis', list)].filter(Boolean));

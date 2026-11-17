@@ -1,10 +1,15 @@
 from datetime import date
 from uuid import UUID
 
+from sqlalchemy import text
+
 from ..repository import Record, Repository
 
 
 class BillingRepository(Repository):
+    def _execute(self, query: str, **parameters) -> None:
+        self.connection.execute(text(query), parameters)
+
     def account(self, tenant_id: UUID) -> Record | None:
         return self._one("""
             SELECT customer_id, environment FROM futuranext.billing_accounts WHERE tenant_id = :tenant
@@ -23,6 +28,42 @@ class BillingRepository(Repository):
                 SET customer_id = excluded.customer_id, environment = excluded.environment
             RETURNING customer_id, environment
         """, tenant=tenant_id, customer=customer_id, environment=environment)[0]
+
+    def try_lock_customer(self, tenant_id: UUID) -> bool:
+        """Evita duas criações simultâneas do cliente Asaas da mesma empresa."""
+        return bool(self._scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))",
+            key=f"futuranext:billing-customer:{tenant_id}",
+        ))
+
+    def customer_profile(self, tenant_id: UUID) -> Record | None:
+        return self._one("""
+            SELECT name, active, document, billing_email, billing_phone
+            FROM futuranext.organizations WHERE id = :tenant
+        """, tenant=tenant_id)
+
+    def has_active_member(self, tenant_id: UUID) -> bool:
+        return bool(self._scalar("""
+            SELECT EXISTS (
+                SELECT FROM futuranext.organization_memberships
+                WHERE tenant_id = :tenant AND active
+            )
+        """, tenant=tenant_id))
+
+    def link_customer_as_member(self, tenant_id: UUID, customer_id: str, environment: str) -> None:
+        """Primeiro vínculo criado automaticamente durante o acesso do próprio cliente."""
+        self._scalar("SELECT set_config('fn.billing_customer_sync', 'true', true)")
+        self._execute("""
+            INSERT INTO futuranext.billing_customer_origins (tenant_id, customer_id, environment)
+            VALUES (:tenant, :customer, :environment)
+            ON CONFLICT (environment, customer_id) DO NOTHING
+        """, tenant=tenant_id, customer=customer_id, environment=environment)
+        self._execute("""
+            INSERT INTO futuranext.billing_accounts (tenant_id, customer_id, environment)
+            VALUES (:tenant, :customer, :environment)
+            ON CONFLICT (tenant_id) DO NOTHING
+        """, tenant=tenant_id, customer=customer_id, environment=environment)
+        self._scalar("SELECT set_config('fn.billing_customer_sync', '', true)")
 
     def services(self, tenant_id: UUID) -> list[Record]:
         return self._rows("""

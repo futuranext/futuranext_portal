@@ -155,10 +155,12 @@ def test_login_invitation_recovery_and_tenant_isolation():
             check(api.get("/api/v1/admin/clients", headers=bearer(admin_aal1)), 403)
             admin = bearer(activate_mfa(auth, admin_aal1, enroll_factor(auth, admin_aal1)))
             tenant_a = check(api.post("/api/v1/admin/clients", headers=admin, json={
-                "name": "Empresa Teste A", "slug": slug_a,
+                "name": "Empresa Teste A", "slug": slug_a, "document": "52998224725",
+                "billing_email": "financeiro@example.com", "billing_phone": "11912345678",
             }), 201)["id"]
             tenant_b = check(api.post("/api/v1/admin/clients", headers=admin, json={
-                "name": "Empresa Teste B", "slug": slug_b,
+                "name": "Empresa Teste B", "slug": slug_b, "document": "11222333000181",
+                "billing_email": "financeiro@example.com", "billing_phone": "11912345678",
             }), 201)["id"]
             products = check(api.get("/api/v1/admin/products", headers=admin), 200)
             product = next(item["id"] for item in products if item["slug"] == "barbearia")

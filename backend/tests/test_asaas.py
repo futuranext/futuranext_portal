@@ -13,6 +13,7 @@ from app.modules.asaas import (
     AsaasUnavailable,
     AsaasUncertainCreation,
     ChargeRequest,
+    CustomerRequest,
     hosted_invoice_url,
 )
 
@@ -214,3 +215,45 @@ def test_asaas_config_defaults_to_sandbox_and_keeps_secrets_private():
     assert config.valid_webhook_token("synthetic-webhook-token")
     assert not config.valid_webhook_token(None)
     assert not config.valid_webhook_token("synthetic-key")
+
+
+def customer_request(phone="11912345678"):
+    return CustomerRequest(
+        " Empresa Teste ", "52998224725", "financeiro@example.com", phone, "futuranext:tenant:1",
+    )
+
+
+@pytest.mark.parametrize(("phone", "field"), [("11912345678", "mobilePhone"), ("1132345678", "phone")])
+def test_create_customer_sends_required_fields_and_disables_paid_notifications(phone, field):
+    def provider(request):
+        assert request.method == "POST"
+        assert request.url == "https://api-sandbox.asaas.com/v3/customers"
+        body = json.loads(request.content)
+        assert body == {
+            "name": "Empresa Teste", "cpfCnpj": "52998224725", "email": "financeiro@example.com",
+            field: phone, "externalReference": "futuranext:tenant:1", "notificationDisabled": True,
+        }
+        return httpx.Response(200, json={**body, "id": "cus_new", "deleted": False})
+
+    with mock_client(provider) as transport:
+        customer = AsaasClient(transport, AsaasConfig("synthetic-key")).create_customer(
+            customer_request(phone)
+        )
+    assert customer.id == "cus_new" and customer.notification_disabled
+
+
+def test_find_customer_by_company_reference_declines_duplicates():
+    def provider(request):
+        assert request.method == "GET"
+        assert request.url.params["externalReference"] == "futuranext:tenant:1"
+        item = {"id": "cus_a", "externalReference": "futuranext:tenant:1", "deleted": False}
+        return httpx.Response(200, json={"hasMore": False, "data": [item, {**item, "id": "cus_b"}]})
+
+    with mock_client(provider) as transport, pytest.raises(AsaasReconciliationError):
+        AsaasClient(transport, AsaasConfig("synthetic-key")).find_customer("futuranext:tenant:1")
+
+
+def test_customer_creation_rejection_is_reported():
+    rejected = mock_client(lambda request: httpx.Response(400, json={"errors": []}))
+    with rejected as transport, pytest.raises(AsaasRejected):
+        AsaasClient(transport, AsaasConfig("synthetic-key")).create_customer(customer_request())
