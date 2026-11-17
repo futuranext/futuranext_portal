@@ -18,6 +18,8 @@ services:
       FN_CORS_ORIGINS: ${FN_CORS_ORIGINS:?Informe FN_CORS_ORIGINS}
       FN_STATIC_DIR: ${FN_STATIC_DIR:-}
       FN_OPENAPI_ENABLED: ${FN_OPENAPI_ENABLED:-false}
+      FN_FISCAL_MASTER_KEY: ${FN_FISCAL_MASTER_KEY:-}
+      FN_EXTERNAL_INTEGRATIONS: ${FN_EXTERNAL_INTEGRATIONS:-}
     read_only: true
     tmpfs:
       - /tmp

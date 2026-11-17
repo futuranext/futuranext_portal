@@ -17,6 +17,11 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .auth import SupabaseAuth
 from .database import Database
+from .modules.agenda import router as agenda_router
+from .modules.catalog import router as catalog_router
+from .modules.fiscal import router as fiscal_router
+from .modules.integrations import router as integrations_router
+from .modules.integrations import webhook_router as integrations_webhook_router
 from .routes import router
 from .settings import Settings
 
@@ -36,6 +41,8 @@ PAGES = {
     "admin/produtos": "admin/produtos.html",
     "admin/usuarios": "admin/usuarios.html",
     "admin/assinaturas": "admin/assinaturas.html",
+    "admin/acessos": "admin/acessos.html",
+    "admin/solicitacoes": "admin/solicitacoes.html",
 }
 LANDING_FILES = {
     "config.js", "script.js", "styles.css", "assets/logo-mark.svg", "assets/favicon.svg",
@@ -52,6 +59,14 @@ class RequestSizeLimit:
             await self.app(scope, receive, send)
             return
 
+        path = scope["path"].rstrip("/")
+        limit = self.limit
+        if (
+            scope["method"] == "PUT"
+            and path.startswith("/api/v1/tenants/")
+            and path.endswith(("/tools/nfse/fiscal/certificate", "/tools/nfse-consulta/fiscal/certificate"))
+        ):
+            limit = 192 * 1024
         total = 0
 
         async def receive_limited():
@@ -59,7 +74,7 @@ class RequestSizeLimit:
             message = await receive()
             if message["type"] == "http.request":
                 total += len(message.get("body", b""))
-                if total > self.limit:
+                if total > limit:
                     raise HTTPException(413, "O corpo da solicitação excede o limite.")
             return message
 
@@ -105,7 +120,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=config.cors_origins,
-        allow_methods=["GET", "POST", "PATCH", "PUT"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
         expose_headers=["X-Request-ID"],
         max_age=600,
@@ -160,6 +175,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(router)
+    app.include_router(catalog_router)
+    app.include_router(fiscal_router)
+    app.include_router(agenda_router)
+    app.include_router(integrations_router)
+    app.include_router(integrations_webhook_router)
     static = config.static_dir.resolve()
     csp = static_content_policy(config)
 

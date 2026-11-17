@@ -81,14 +81,21 @@ def list_products(identity: CurrentUser, database: Data):
 def create_product(payload: s.ProductCreate, identity: CurrentUser, database: Data):
     with tenant_repository(database, identity) as repo:
         require_permission(repo, "admin.product.manage")
-        return repo.create_product(payload.slug, payload.name, payload.description)
+        return repo.create_product(
+            payload.slug, payload.name, payload.description,
+            offerable=payload.offerable, launch_url=payload.launch_url,
+        )
 
 
 @admin.patch("/products/{product_id}", response_model=s.AdminProduct)
 def update_product(product_id: UUID, payload: s.ProductUpdate, identity: CurrentUser, database: Data):
     with tenant_repository(database, identity) as repo:
         require_permission(repo, "admin.product.manage")
-        return resource(repo.update_product(product_id, payload.name, payload.description, payload.active))
+        return resource(repo.update_product(
+            product_id, payload.name, payload.description, payload.active,
+            offerable=payload.offerable, launch_url=payload.launch_url,
+            update_launch_url="launch_url" in payload.model_fields_set,
+        ))
 
 
 @admin.get("/clients/{tenant_id}/licenses", response_model=list[s.License])

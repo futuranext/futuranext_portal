@@ -43,6 +43,7 @@ const apiErrors = new Map([
   [403, 'Seu perfil ou sua sessão atual não tem permissão para esta operação.'],
   [404, 'O registro não foi encontrado ou está fora do seu acesso.'],
   [409, 'Esta operação conflita com um registro existente. Atualize a página e confira os dados.'],
+  [413, 'O arquivo ou formulário ultrapassa o tamanho permitido.'],
   [422, 'Confira os dados e os formatos informados.'],
   [429, 'Muitas solicitações em pouco tempo. Aguarde alguns instantes.'],
 ]);
@@ -54,12 +55,15 @@ export class ApiError extends UserMessage {
   }
 }
 
-export async function api(path, {method = 'GET', body, signal} = {}) {
+export async function api(path, {method = 'GET', body, signal, responseType = 'json'} = {}) {
   const current = await session();
   if (!current) throw new ApiError(401);
   const timeout = AbortSignal.timeout(15000);
   const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  const headers = {Accept: 'application/json', Authorization: `Bearer ${current.access_token}`};
+  const headers = {
+    Accept: responseType === 'blob' ? 'application/octet-stream, */*' : 'application/json',
+    Authorization: `Bearer ${current.access_token}`,
+  };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
   let response;
   try {
@@ -78,7 +82,8 @@ export async function api(path, {method = 'GET', body, signal} = {}) {
     throw new UserMessage('Não foi possível conectar ao serviço. Confira sua conexão e tente novamente.');
   }
   if (!response.ok) throw new ApiError(response.status);
-  return response.status === 204 ? null : response.json();
+  if (response.status === 204) return null;
+  return responseType === 'blob' ? response.blob() : response.json();
 }
 
 export function resource(id) {

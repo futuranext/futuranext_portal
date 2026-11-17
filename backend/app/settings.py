@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     supabase_issuer: str | None = None
     supabase_publishable_key: SecretStr | None = None
     supabase_admin_key: SecretStr | None = None
+    fiscal_master_key: SecretStr | None = None
     auth_mode: Literal["jwks", "remote"] = "jwks"
     frontend_url: str = "http://localhost:8088"
     cors_origins: list[str] = []

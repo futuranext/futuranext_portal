@@ -170,6 +170,82 @@ def test_rls_and_readiness_deny_unscoped_access(platform: Platform) -> None:
         assert Repository(connection).list_products() == []
 
 
+def test_admin_grants_and_revokes_individual_company_access(platform: Platform) -> None:
+    bob_email = email_for("bob", platform.suffix)
+    with platform.owner.begin() as connection:
+        unconfirmed = add_auth_user(
+            connection, email_for("pending-access", platform.suffix), confirmed=False
+        )
+    with platform.database.session(platform.admin, "aal1") as connection:
+        repo = Repository(connection)
+        assert repo.search_accounts(bob_email) == []
+        assert not repo.set_account_access(platform.bob, platform.tenant_a, "cliente_admin", True)
+    with platform.database.session(platform.admin, "aal2") as connection:
+        repo = Repository(connection)
+        assert repo.search_accounts(bob_email) == [{"user_id": platform.bob, "email": bob_email}]
+        assert not repo.set_account_access(unconfirmed, platform.tenant_a, "cliente_admin", True)
+        assert repo.set_account_access(platform.bob, platform.tenant_a, "cliente_admin", True)
+        access = {record["tenant_id"]: record for record in repo.account_access(platform.bob)}
+        assert access[platform.tenant_a]["role"] == "cliente_admin"
+        assert access[platform.tenant_a]["granted"]
+        assert access[platform.tenant_b]["granted"]
+    with platform.database.session(platform.bob, "aal1", platform.tenant_a) as connection:
+        assert Repository(connection).can_use_tool(platform.tenant_a, "barbearia", write=True)
+        assert not Repository(connection).can_use_tool(platform.tenant_b, "clinica")
+    with platform.database.session(platform.admin, "aal2", platform.tenant_a) as connection:
+        invite = Repository(connection).create_invitation(
+            platform.tenant_a, bob_email, "cliente_admin"
+        )
+        assert invite is not None
+    with platform.database.session(platform.admin, "aal2") as connection:
+        assert Repository(connection).set_account_access(
+            platform.bob, platform.tenant_a, "cliente_admin", False
+        )
+    with platform.database.session(platform.bob, "aal1", platform.tenant_a) as connection:
+        assert not Repository(connection).can_use_tool(platform.tenant_a, "barbearia")
+    with platform.database.session(platform.bob, "aal1") as connection:
+        repo = Repository(connection)
+        assert repo.pending_invitations(bob_email) == []
+        assert not repo.accept_invitation(invite["id"], bob_email)
+
+
+def test_seeded_tools_and_whatsapp_offer_activation(platform: Platform) -> None:
+    with platform.database.session(platform.admin, "aal2") as connection:
+        repo = Repository(connection)
+        companies = {company["name"]: company["id"] for company in repo.list_organizations()}
+        assert {"Equinos Seguros", "CCP - Clegio Clemente Pavan", "PetCamp", "Estetica Paraiso",
+                "Barbearia Stylus"} <= companies.keys()
+        company = companies["Barbearia Stylus"]
+        assert repo.set_account_access(platform.alice, company, "cliente_admin", True)
+        products = {product["slug"]: product["id"] for product in repo.list_products()}
+        whatsapp = products["whatsapp"]
+    with platform.database.session(platform.alice, "aal2", company) as connection:
+        repo = Repository(connection)
+        assert repo.can_use_tool(company, "barbearia", write=True)
+        assert repo.tool_offers(platform.tenant_b) == []
+        assert repo.request_tool(platform.tenant_b, whatsapp) is None
+        assert repo.request_tool(company, products["cotacao-seguros"]) is None
+        request_id = repo.request_tool(company, whatsapp)
+        assert request_id is not None and repo.request_tool(company, whatsapp) == request_id
+        assert not repo.review_tool_request(request_id, "approved")
+    with platform.database.session(platform.admin, "aal2") as connection:
+        repo = Repository(connection)
+        assert any(request["id"] == request_id for request in repo.list_tool_requests())
+        assert repo.review_tool_request(request_id, "approved")
+        assert repo.review_tool_request(request_id, "approved")
+        assert not repo.review_tool_request(request_id, "rejected")
+    with platform.database.session(platform.alice, "aal1", company) as connection:
+        repo = Repository(connection)
+        assert repo.can_use_tool(company, "whatsapp")
+        assert all(offer["id"] != whatsapp for offer in repo.tool_offers(company))
+    with platform.database.session(platform.bob, "aal1", platform.tenant_b) as connection:
+        assert not Repository(connection).can_use_tool(platform.tenant_b, "whatsapp")
+    with platform.database.session(platform.admin, "aal2") as connection:
+        assert Repository(connection).set_account_access(platform.alice, company, "cliente_admin", False)
+    with platform.database.session(platform.admin, "aal2", company) as connection:
+        assert Repository(connection).upsert_entitlement(company, whatsapp, False, None, None)
+
+
 def test_isolation_on_organization_members_and_products(platform: Platform) -> None:
     with platform.database.session(platform.alice, "aal2", platform.tenant_a) as connection:
         repo = Repository(connection)

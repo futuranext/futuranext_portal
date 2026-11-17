@@ -4,10 +4,10 @@ import {button, element, link, notice, runAction, screen, statusMessage, UserMes
 export const view = document.body.dataset.view;
 export const isStaff = (context) => ['super_admin', 'suporte'].includes(context.platform_role);
 
-export function navigation(entries) {
+export function navigation(entries, active = view) {
   const nav = document.getElementById('navigation');
   nav.replaceChildren(...entries.map(([path, label, id]) => (
-    element('a', {href: path, 'aria-current': view === id ? 'page' : null}, label)
+    element('a', {href: path, 'aria-current': active === id ? 'page' : null}, label)
   )));
 }
 

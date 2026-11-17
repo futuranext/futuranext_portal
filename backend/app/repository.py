@@ -28,6 +28,12 @@ class Repository:
             self._scalar("SELECT futuranext.has_permission(:permission)", permission=permission)
         )
 
+    def can_use_tool(self, tenant_id: UUID, slug: str, *, write: bool = False) -> bool:
+        return bool(self._scalar(
+            "SELECT futuranext.can_use_tool(:tenant_id, :slug, :write)",
+            tenant_id=tenant_id, slug=slug, write=write,
+        ))
+
     def context(self) -> Record:
         return {
             "platform_role": self._scalar("SELECT futuranext.platform_role()"),
@@ -43,7 +49,7 @@ class Repository:
     def tenant_products(self, tenant_id: UUID) -> list[Record]:
         return self._rows(
             """
-            SELECT product.id, product.slug, product.name, product.description, product.active
+            SELECT product.id, product.slug, product.name, product.description, product.launch_url
             FROM futuranext.products AS product
             JOIN futuranext.tenant_products AS license ON license.product_id = product.id
             WHERE license.tenant_id = :tenant_id
@@ -92,33 +98,83 @@ class Repository:
 
     def list_products(self) -> list[Record]:
         return self._rows("""
-            SELECT id, slug, name, description, active FROM futuranext.products ORDER BY name, id
+            SELECT id, slug, name, description, active, offerable, launch_url
+            FROM futuranext.products ORDER BY name, id
         """)
 
-    def create_product(self, slug: str, name: str, description: str) -> Record | None:
+    def create_product(
+        self, slug: str, name: str, description: str, *,
+        offerable: bool = False, launch_url: str | None = None,
+    ) -> Record | None:
         return self._one(
             """
-            INSERT INTO futuranext.products (slug, name, description) VALUES (:slug, :name, :description)
-            RETURNING id, slug, name, description, active
+            INSERT INTO futuranext.products (slug, name, description, offerable, launch_url)
+            VALUES (:slug, :name, :description, :offerable, :launch_url)
+            RETURNING id, slug, name, description, active, offerable, launch_url
         """,
             slug=slug,
             name=name,
             description=description,
+            offerable=offerable,
+            launch_url=launch_url,
         )
 
     def update_product(
-        self, product_id: UUID, name: str, description: str, active: bool
+        self, product_id: UUID, name: str, description: str, active: bool, *,
+        offerable: bool | None = None, launch_url: str | None = None, update_launch_url: bool = False,
     ) -> Record | None:
         return self._one(
             """
-            UPDATE futuranext.products SET name = :name, description = :description, active = :active
-            WHERE id = :product_id RETURNING id, slug, name, description, active
+            UPDATE futuranext.products SET name = :name, description = :description, active = :active,
+                offerable = COALESCE(:offerable, offerable),
+                launch_url = CASE WHEN :update_launch_url THEN :launch_url ELSE launch_url END
+            WHERE id = :product_id RETURNING id, slug, name, description, active, offerable, launch_url
         """,
             product_id=product_id,
             name=name,
             description=description,
             active=active,
+            offerable=offerable,
+            launch_url=launch_url,
+            update_launch_url=update_launch_url,
         )
+
+    def search_accounts(self, search: str) -> list[Record]:
+        return self._rows("SELECT * FROM futuranext.search_accounts(:search)", search=search)
+
+    def account_access(self, user_id: UUID) -> list[Record]:
+        return self._rows("SELECT * FROM futuranext.account_access(:user_id)", user_id=user_id)
+
+    def set_account_access(self, user_id: UUID, tenant_id: UUID, role: str, granted: bool) -> bool:
+        return bool(self._scalar(
+            "SELECT futuranext.set_account_access(:user_id, :tenant_id, :role, :granted)",
+            user_id=user_id, tenant_id=tenant_id, role=role, granted=granted,
+        ))
+
+    def tool_offers(self, tenant_id: UUID) -> list[Record]:
+        return self._rows("SELECT * FROM futuranext.tool_offers(:tenant_id)", tenant_id=tenant_id)
+
+    def request_tool(self, tenant_id: UUID, product_id: UUID) -> UUID | None:
+        return self._scalar(
+            "SELECT futuranext.request_tool(:tenant_id, :product_id)",
+            tenant_id=tenant_id, product_id=product_id,
+        )
+
+    def list_tool_requests(self) -> list[Record]:
+        return self._rows("""
+            SELECT req.id, org.name AS organization, product.name AS product, req.status, req.created_at
+            FROM futuranext.tool_requests AS req
+            JOIN futuranext.organizations AS org ON org.id = req.tenant_id
+            JOIN futuranext.products AS product ON product.id = req.product_id
+            ORDER BY (req.status = 'pending') DESC, req.created_at DESC, req.id
+            LIMIT 200
+        """)
+
+    def review_tool_request(self, request_id: UUID, status: str) -> bool:
+        return bool(self._scalar(
+            "SELECT futuranext.review_tool_request(:request_id, :status)",
+            request_id=request_id, status=status,
+        ))
 
     def list_entitlements(self, tenant_id: UUID) -> list[Record]:
         return self._rows(

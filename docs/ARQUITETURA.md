@@ -22,17 +22,18 @@ flowchart LR
 - FastAPI é um monólito modular com rotas e schemas, casos de uso, políticas, repositórios SQLAlchemy e adaptadores HTTP. Usar Python 3.12 como base do contêiner e confirmar a resolução de dependências e a suíte antes de declarar suporte a outras versões. Alembic mantém uma única linha de migrações. PostgreSQL é provido pelo Supabase em HML/PROD. O ambiente de desenvolvimento usa um projeto Supabase local ou dedicado.
 - Na Fase 1, `GET /health/live` verifica o processo e `GET /health/ready` verifica conectividade e compatibilidade do schema do banco, com timeouts curtos e resposta sem detalhes de conexão. A disponibilidade do Auth recebe monitoramento próprio. A especificação OpenAPI parte dos contratos reais em `/api/v1`; em produção, restringir a interface interativa de documentação conforme o ambiente.
 
-## Contratos da primeira implementação
+## Contratos do portal
 
 | Interface | Fluxo |
 | --- | --- |
 | `/login`, `/recuperar-senha`, `/ativar-conta` | Login com e-mail e senha, recuperação e ativação via Supabase Auth. Administradores elevam a sessão para `aal2` via TOTP antes de ações administrativas. |
-| `/portal`, `/portal/produtos`, `/portal/perfil`, `/portal/usuarios` | Consultar empresas disponíveis, selecionar uma quando houver mais de uma, trocar de empresa, listar produtos autorizados e mostrar o perfil da conta. Cliente admin com MFA gerencia usuários comuns na empresa selecionada. |
-| `/admin`, `/admin/clientes`, `/admin/usuarios`, `/admin/produtos`, `/admin/assinaturas` | Gestão real de empresas, convites, associações, catálogo e licenças, com auditoria das alterações. |
+| `/portal`, `/portal/produtos`, `/portal/perfil`, `/portal/usuarios` | Selecionar empresa, usar ferramentas liberadas, solicitar novas ferramentas e gerenciar perfil. Cliente admin com MFA gerencia usuários comuns na empresa selecionada. |
+| `/admin/clientes`, `/admin/usuarios`, `/admin/produtos`, `/admin/assinaturas`, `/admin/acessos`, `/admin/solicitacoes` | Gestão de empresas, convites, acessos por empresa, catálogo, licenças e solicitações com auditoria das alterações. |
 | `/api/v1/auth/context`, `/api/v1/auth/invitations/{invitation_id}/accept`, `/api/v1/tenants/{tenant_id}/products` | Contexto de identidade e empresas elegíveis, aceite explícito de convite e leitura do catálogo autorizado no tenant informado. |
 | `/api/v1/admin/*` | Operações administrativas separadas por recurso, com checagens de papel, escopo, ação e MFA. |
+| `/api/v1/tenants/{tenant_id}/tools/*` | Agenda e configurações de conversa, parâmetros fiscais e certificados, portais externos e estado dos webhooks de WhatsApp. |
 
-O catálogo usa metadados e chaves estáveis. Licenciamento, autorização e disponibilidade do módulo são estados independentes. Cadastrar um produto atualiza o catálogo sem precisar mudar o menu. O acesso a cada produto depende da implementação de seu módulo. Telas de agenda, emissão, chamados, jobs e integrações entram nas fases correspondentes.
+O catálogo usa identificadores estáveis e licenças por empresa. As ferramentas externas podem ser cadastradas por link. Ferramentas com dados próprios reutilizam a verificação de acesso e têm políticas por empresa nas próprias tabelas. A interface carrega o código de cada módulo apenas quando aberto. [Guia de operação e atualização do portal](PORTAL_FERRAMENTAS.md)
 
 ## Identidade, autorização e banco
 
@@ -48,10 +49,11 @@ O catálogo usa metadados e chaves estáveis. Licenciamento, autorização e dis
 | `cliente_admin` | Gestão de usuários da própria empresa com permissões explícitas, limitada aos papéis que pode delegar. |
 | `cliente_usuario` | Ações permitidas dentro da empresa escolhida e dos produtos contratados. |
 
-## Fronteiras para as fases de produtos
+## Módulos e próximas integrações
 
-- **Barbearia e clínica.** Compartilham adaptadores, recepção de eventos de canal, jobs, estrutura de unidades e catálogo de serviços. Cada módulo tem regras e ações próprias. Configurações publicáveis mantêm histórico. A agenda valida disponibilidade no banco e protege o intervalo contra reservas simultâneas por profissional. Horários são armazenados em UTC e exibidos em `America/Sao_Paulo`.
-- **NFS-e.** Lotes, itens, prestadores, documentos e tentativas têm identidades e estados distintos. Upload gera validação por linha. Confirmação autorizada promove itens elegíveis e persiste jobs na mesma transação. O executor usa chave de negócio única para deduplicação por tenant/prestador; retorno incerto exige reconciliação antes de reenviar. Os conectores nacional e municipais dependem de homologação própria.
+- **Barbearia e clínica.** Compartilham o módulo de agenda e os cadastros de profissionais, serviços e produtos. Cada empresa configura seu expediente e as regras de conversa. A agenda valida disponibilidade no banco e protege os horários contra reservas simultâneas por profissional. Os horários são armazenados em UTC e exibidos em `America/Sao_Paulo`. Os futuros bots podem consumir os contratos do módulo.
+- **NFS-e.** Emissão e consulta têm licenças e configurações independentes, com certificados A1 cifrados. A transmissão de lotes e a distribuição de notas serão integradas após homologação. A emissão deve deduplicar por chave de negócio e reconciliar retornos incertos antes de reenviar. [Guia fiscal](NFSE.md)
+- **WhatsApp e Equinos.** O portal autoriza o acesso à empresa e entrega os links configurados pelo operador. A API WhatsApp encaminha eventos assinados a destinos cadastrados no worker. A Equinos mantém seu próprio login e a automação de cotações. [Integrações externas](INTEGRACOES_EXTERNAS.md)
 - **Fila durável.** Quando houver trabalho realmente assíncrono, começar com `background_jobs` em PostgreSQL. Uma transação registra eventos de negócio e jobs de forma atômica. O worker reserva jobs em transações curtas, com lease recuperável e tentativas limitadas. Executar I/O fora do lock e persistir resultado auditável. Controlar concorrência por tenant/provedor. Migrar para fila gerenciada ou Redis/Valkey apenas com justificativa operacional.
 - **Anexos e documentos.** Buckets privados, metadados por tenant e URLs temporárias emitidas após revalidar autorização. Backups de objetos e banco têm escopo e procedimentos de recuperação próprios. O ciclo de vida do objeto acompanha as regras de retenção do módulo.
 - **Suporte, leads e IA.** Dados separados por empresa, com prioridade, histórico e retenção definidas. Leads exigem escolha afirmativa explícita antes da persistência. Uso opcional de IA passa por fontes e escopos autorizados, orçamento por tenant e validação transacional para operações de agenda. Emissão e gestão de credenciais ficam fora da interface de IA.

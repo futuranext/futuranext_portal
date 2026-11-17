@@ -1,4 +1,5 @@
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import (
@@ -49,16 +50,38 @@ class MembershipContext(BaseModel):
     role: ClientRole
 
 
-class ProductCreate(Input):
+class ProductFields(Input):
     name: Name
+    launch_url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2048)] | None = None
+
+    @field_validator("launch_url")
+    @classmethod
+    def validate_launch_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        hostname = parsed.hostname or ""
+        if (
+            parsed.scheme != "https" or "." not in hostname
+            or not hostname.rsplit(".", 1)[-1].isalpha()
+            or hostname.endswith((".localhost", ".local", ".internal"))
+            or parsed.username is not None or parsed.query or parsed.fragment
+            or "\\" in value or any(character.isspace() for character in value)
+        ):
+            raise ValueError("Informe uma URL HTTPS pública, sem credenciais ou parâmetros.")
+        return value
+
+
+class ProductCreate(ProductFields):
     slug: Slug
     description: Description = ""
+    offerable: bool = False
 
 
-class ProductUpdate(Input):
-    name: Name
+class ProductUpdate(ProductFields):
     description: Description
     active: bool
+    offerable: bool | None = None
 
 
 class PortalProduct(BaseModel):
@@ -66,10 +89,12 @@ class PortalProduct(BaseModel):
     name: str
     slug: str
     description: str
+    launch_url: str | None = None
 
 
 class AdminProduct(PortalProduct):
     active: bool
+    offerable: bool = False
 
 
 class LicenseUpdate(Input):

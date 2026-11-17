@@ -2,6 +2,8 @@
 
 Este guia publica o site e o portal em `https://futuranext.com.br`, com a API em `https://api.futuranext.com.br`. Use **PowerShell no Windows** para os comandos locais e **SSH no Droplet** para os comandos do servidor. Substitua os valores em maiúsculas nos exemplos pelos que os painéis fornecerem.
 
+Se o site já está publicado, consulte o [guia de atualização do portal de ferramentas](PORTAL_FERRAMENTAS.md#atualizar-a-publicação-existente).
+
 O piloto usa Cloudflare Free, Supabase Free e um Droplet Basic Regular de 1 GiB por **US$ 6/mês**, antes de impostos e backup opcional. O backup semanal leva essa estimativa a **US$ 7,20/mês**. O Supabase Free pode pausar após uma semana de inatividade. [Cloudflare Pages](https://developers.cloudflare.com/pages/functions/pricing/) · [Supabase](https://supabase.com/pricing) · [DigitalOcean](https://www.digitalocean.com/pricing/droplets) · [Backups da DigitalOcean](https://docs.digitalocean.com/products/backups/details/pricing/)
 
 ## 1. Crie o projeto Supabase Free

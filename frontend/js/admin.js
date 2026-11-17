@@ -1,6 +1,7 @@
 import {api, resource} from './client.js';
 import {members} from './members.js';
 import {requireMfa} from './mfa.js';
+import {toolRequests, userAccess} from './user-access.js';
 import {actionForm, checkField, dateTime, element, field, inputField, link, muted, notice, panel, screen, select, UserMessage} from './ui.js';
 import {boot, isStaff, navigation, view} from './workspace.js';
 
@@ -10,6 +11,8 @@ const pages = [
   ['/admin/usuarios', 'Usuários', 'members'],
   ['/admin/produtos', 'Catálogo de produtos', 'products'],
   ['/admin/assinaturas', 'Licenças', 'licenses'],
+  ['/admin/acessos', 'Acessos por usuário', 'access'],
+  ['/admin/solicitacoes', 'Solicitações', 'requests'],
 ];
 
 const clientsPath = '/admin/clients';
@@ -21,6 +24,20 @@ const slugField = () => inputField('Identificador', 'slug', {
 
 const description = (text) => field('Descrição', element('textarea', {name: 'description', maxlength: 1000, rows: 3}, text));
 const activeLabel = (active) => active ? 'Ativo' : 'Inativo';
+const productFields = (item = {}) => [
+  description(item.description ?? ''),
+  inputField('URL externa da ferramenta', 'launch_url', {type: 'url', maxlength: 2048, value: item.launch_url},
+    'Para ferramentas por link. Use HTTPS, sem credenciais ou parâmetros.'),
+  checkField('Oferecer para aquisição no portal', 'offerable', item.offerable),
+];
+
+function productValues(data) {
+  return {
+    description: data.get('description').trim(),
+    launch_url: data.get('launch_url').trim() || null,
+    offerable: data.has('offerable'),
+  };
+}
 
 async function catalog(canEdit, products) {
   const path = products ? productsPath : clientsPath;
@@ -36,11 +53,11 @@ async function catalog(canEdit, products) {
       const summary = element('summary', {}, title());
       const form = actionForm([
         nameField(item.name),
-        products && description(item.description),
+        ...(products ? productFields(item) : []),
         checkField(products ? 'Produto ativo' : 'Empresa ativa', 'active', item.active),
       ].filter(Boolean), `Salvar ${label}`, async (data) => {
         const body = {name: data.get('name').trim(), active: data.has('active')};
-        if (products) body.description = data.get('description').trim();
+        if (products) Object.assign(body, productValues(data));
         await api(`${path}/${resource(item.id)}`, {method: 'PATCH', body});
         Object.assign(item, body);
         summary.textContent = title();
@@ -54,10 +71,10 @@ async function catalog(canEdit, products) {
   drawRecords();
   const create = canEdit ? panel(products ? 'Novo produto' : 'Nova empresa', actionForm([
     element('div', {class: 'form-grid'}, nameField(), slugField()),
-    products && description(''),
+    ...(products ? productFields() : []),
   ].filter(Boolean), `Cadastrar ${label}`, async (data, form) => {
     const body = {name: data.get('name').trim(), slug: data.get('slug')};
-    if (products) body.description = data.get('description').trim();
+    if (products) Object.assign(body, productValues(data));
     records.unshift(await api(path, {method: 'POST', body}));
     drawRecords();
     form.reset();
@@ -78,6 +95,9 @@ async function overview(canEdit) {
     link('/admin/produtos', 'Ver catálogo'),
   ) : null;
   screen.replaceChildren(element('div', {class: 'split-panels'}, companiesPanel, productsPanel));
+  if (canEdit) screen.append(panel('Acessos e ativações',
+    link('/admin/acessos', 'Gerenciar acessos por usuário'),
+    link('/admin/solicitacoes', 'Analisar solicitações de ferramentas')));
 }
 
 function localDateInput(value) {
@@ -193,6 +213,10 @@ void boot('admin', async (context) => {
     await overview(canEdit);
   } else if (view === 'clients' || view === 'products' && canEdit) {
     await catalog(canEdit, view === 'products');
+  } else if (view === 'access') {
+    userAccess();
+  } else if (view === 'requests') {
+    await toolRequests();
   } else {
     await companyManagement(canEdit);
   }

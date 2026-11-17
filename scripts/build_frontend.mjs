@@ -96,7 +96,7 @@ const authRoutes = [
 ];
 const portalRoutes = [
   ['portal', 'Visão geral', 'overview'],
-  ['portal/produtos', 'Seus produtos', 'products'],
+  ['portal/produtos', 'Ferramentas', 'products'],
   ['portal/perfil', 'Meu perfil', 'profile'],
   ['portal/usuarios', 'Usuários da empresa', 'members'],
 ];
@@ -106,6 +106,8 @@ const adminRoutes = [
   ['admin/usuarios', 'Usuários', 'members'],
   ['admin/produtos', 'Catálogo de produtos', 'products'],
   ['admin/assinaturas', 'Licenças', 'licenses'],
+  ['admin/acessos', 'Acessos por usuário', 'access'],
+  ['admin/solicitacoes', 'Solicitações de ferramentas', 'requests'],
 ];
 
 async function generatePages(templateFile, routes, common = {}) {
