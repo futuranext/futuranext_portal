@@ -25,6 +25,8 @@ from .modules.catalog import router as catalog_router
 from .modules.fiscal import router as fiscal_router
 from .modules.integrations import router as integrations_router
 from .modules.integrations import webhook_router as integrations_webhook_router
+from .modules.whatsapp import WhatsAppService
+from .modules.whatsapp import router as whatsapp_router
 from .routes import router
 from .settings import Settings
 
@@ -116,6 +118,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ),
                 )
                 app.state.asaas = AsaasClient(client, provider)
+            if config.whatsapp_service_url and config.whatsapp_service_token:
+                app.state.whatsapp = WhatsAppService(
+                    client, config.whatsapp_service_url,
+                    config.whatsapp_service_token.get_secret_value(),
+                )
             if config.supabase_url and config.supabase_issuer and config.supabase_publishable_key:
                 app.state.auth = SupabaseAuth(
                     client,
@@ -145,6 +152,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.database = None
     app.state.asaas = None
     app.state.first_access_mailer = None
+    app.state.whatsapp = None
     app.add_middleware(RequestSizeLimit)
     app.add_middleware(
         CORSMiddleware,
@@ -208,6 +216,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(fiscal_router)
     app.include_router(agenda_router)
     app.include_router(billing_router)
+    app.include_router(whatsapp_router)
     app.include_router(integrations_router)
     app.include_router(integrations_webhook_router)
     static = config.static_dir.resolve()

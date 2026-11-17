@@ -2,15 +2,11 @@ import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from sqlalchemy import text
 from test_postgres import Platform, platform  # noqa: F401 - fixture PostgreSQL compartilhada
 
-from app.auth import Identity
-from app.dependencies import authenticate, get_database
 from app.modules.external_whatsapp import WhatsAppEvent
-from app.modules.integrations import persist_event, router
+from app.modules.integrations import persist_event
 from app.repository import Repository
 
 
@@ -37,28 +33,21 @@ def test_event_receipt_is_deduplicated_and_respects_license(
         product_id = db.scalar(text("SELECT id FROM futuranext.products WHERE slug = 'whatsapp'"))
         assert product_id is not None
 
-    app = FastAPI()
-    app.include_router(router)
-    app.dependency_overrides[get_database] = lambda: platform.database
-    app.dependency_overrides[authenticate] = lambda: Identity(platform.alice, None, "aal2", "test")
-    path = f"/api/v1/tenants/{platform.tenant_a}/tools/whatsapp"
-
     event = WhatsAppEvent(
         id=event_id,
         type="message.received",
         instance_id=instance,
         occurred_at=datetime.now(UTC),
     )
-    with TestClient(app) as client:
-        assert client.get(path).status_code == 404
-        assert persist_event(platform.database, platform.tenant_a, event) == "unavailable"
-        with platform.database.session(platform.admin, "aal2", platform.tenant_a) as db:
-            Repository(db).upsert_entitlement(platform.tenant_a, product_id, True, None, None)
-        assert not client.get(path).json()["enabled"]
-        activated = client.put(f"{path}/webhook", json={"enabled": True})
-        assert activated.status_code == 200
-        assert activated.json()["enabled"]
-        assert secret not in activated.text
+    assert persist_event(platform.database, platform.tenant_a, event) == "unavailable"
+    with platform.database.session(platform.admin, "aal2", platform.tenant_a) as db:
+        Repository(db).upsert_entitlement(platform.tenant_a, product_id, True, None, None)
+    # O painel antigo de metadados saiu do portal; o recebimento continua para destinos legados.
+    with platform.owner.begin() as db:
+        db.execute(
+            text("INSERT INTO futuranext.whatsapp_webhooks (tenant_id, instance_id) VALUES (:t, :i)"),
+            {"t": platform.tenant_a, "i": instance},
+        )
 
     assert persist_event(platform.database, platform.tenant_a, event) == "accepted"
     assert persist_event(platform.database, platform.tenant_a, event) == "duplicate"

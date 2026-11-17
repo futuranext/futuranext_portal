@@ -2,7 +2,7 @@
 
 Plataforma multiempresa para comercializar e administrar ferramentas, usuários e serviços da FuturaNext. Reúne site institucional, portal do cliente, administração global, agenda, configurações fiscais, integrações externas e cobranças.
 
-Este README concentra a passagem de contexto para outro desenvolvedor ou assistente de IA. Revisão de **17/11/2026**, baseada no código da `main` em **0626bb9**, nas migrações e em consultas de leitura ao ambiente instalado. Confira versões e configurações externas novamente ao iniciar uma manutenção.
+Este README concentra a passagem de contexto para outro desenvolvedor ou assistente de IA. Revisão de **17/11/2026**, baseada no código da `main` em **13e5d69**, nas migrações e em consultas de leitura ao ambiente instalado. Confira versões e configurações externas novamente ao iniciar uma manutenção.
 
 ## 1. Como continuar o desenvolvimento
 
@@ -19,15 +19,15 @@ A solicitação atual do usuário define o escopo. Mudanças rotineiras e revers
 
 | Componente | Estado verificado |
 | --- | --- |
-| Repositório | `https://github.com/futuranext/futuranext_portal`, branch `main`, commit `0626bb9` |
+| Repositório | `https://github.com/futuranext/futuranext_portal`, branch `main`, commit `13e5d69` |
 | Site | `https://futuranext.com.br`, Cloudflare Pages conectado ao GitHub |
-| API | `https://api.futuranext.com.br`, imagem `futuranext-api:0626bb9` |
-| Banco | Supabase PostgreSQL, revisão `0010_user_deletion` |
+| API | `https://api.futuranext.com.br`, imagem `futuranext-api:13e5d69`, publicada pelo [passo a passo](docs/ATUALIZAR_API.md) |
+| Banco | Supabase PostgreSQL, revisão `0011_billing_customer` |
 | Saúde da API | `/health/ready` respondeu com sucesso |
 | Autenticação | Supabase Auth, MFA TOTP obrigatório e troca de senha inicial implementados |
 | Exclusão de usuários | Implementada no portal e na API |
 | E-mail inicial | Código publicado e variáveis Zoho presentes dentro do contêiner. Esta revisão conferiu configuração, sem enviar uma mensagem real |
-| Asaas | Adaptador, telas e banco implementados. Chave da API e token de webhook pendentes no runtime consultado |
+| Asaas | Criação automática do cliente (`cus_…`) com notificações pagas desativadas. Chave da API e token de webhook configurados no runtime em 17/11/2026. Conferir o webhook no painel Asaas e homologar o checkout |
 | Integrações externas | Contratos implementados. `FN_EXTERNAL_INTEGRATIONS` pendente no runtime consultado |
 | Certificados fiscais | Chave mestra presente. Operação fiscal real depende de executor e homologação |
 | Homologação | Topologia proposta nos documentos. Esta revisão confirmou o ambiente de produção |
@@ -286,23 +286,16 @@ Origem informada `C:\RPA\RPA_Cotacao_de_Seguro_V1.0`. O bot roda em máquina loc
 
 ### WhatsApp
 
-Origem informada `C:\Projetos\Api_WhatsApp`. O portal usa `whatsapp` para acesso ao painel externo e recebimento de metadados.
+O serviço veio de `C:\Projetos\Api_WhatsApp` e agora fica em [`whatsapp/`](whatsapp/), sem o painel Next.js próprio. Tudo é feito no portal, em **Ferramentas › WhatsApp**: aceite, QR Code, webhook do bot e chaves de API. Publicação e uso pelo bot em [WHATSAPP_PUBLICACAO.md](docs/WHATSAPP_PUBLICACAO.md).
 
-`FN_EXTERNAL_INTEGRATIONS` é JSON privado indexado pelo UUID FuturaNext da empresa. Campos `equinos_portal_url`, `whatsapp_portal_url`, `whatsapp_instance_id` e `whatsapp_webhook_secret`.
+- **Aceite (`0012_whatsapp_consent`).** O administrador da empresa (`cliente_admin`) que vai parear o número recebe um e-mail com o link "Li e aceito". O link leva a `/portal/produtos?ferramenta=whatsapp&empresa=<id>#aceite=<token>`, só vale na sessão do mesmo usuário e expira em 24 horas. O banco guarda apenas o hash do token. Sem aceite, a API recusa conectar, mostrar o QR Code, cadastrar webhook e criar chaves.
+- **Sem consentimento por destinatário.** O envio é bloqueado apenas para quem fez opt-out, respondendo SAIR, PARAR, STOP ou CANCELAR.
+- **Serviço interno.** A API do portal chama `FN_WHATSAPP_SERVICE_URL` (`http://whatsapp-api:8000`) com `FN_WHATSAPP_SERVICE_TOKEN`, nas rotas `/service/v1/tenants/{tenant}/whatsapp`. O tenant do serviço é o UUID da empresa no portal. Há uma instância por empresa, criada automaticamente na primeira conexão.
+- **Webhook do bot.** O cliente cadastra a URL HTTPS pública. O segredo `whsec_...` aparece uma única vez e fica criptografado na coleção `callback_destinations`. O worker recarrega os destinos a cada 10 segundos. Assinatura HMAC-SHA256 em `X-Timestamp`/`X-Signature`, com eventos `message.received`, `message.status` e `instance.connection`.
+- **Chaves `wp_...`.** Escopos `messages:send`, `messages:read` e `instances:read`, limitadas à instância da empresa, com validade de 365 dias e no máximo 10 ativas. São usadas em `FN_WHATSAPP_PUBLIC_API_URL` (`https://api.futuranext.com.br/whatsapp`). O Caddy publica só `/whatsapp/api/v1/messages*` e `/whatsapp/api/v1/instances*`.
+- **Limites.** 1 envio a cada 5 segundos por número e 100 por dia por empresa.
 
-- Painel WhatsApp em raiz HTTPS dedicada.
-- Instância e segredo configurados juntos. Segredo de pelo menos 32 bytes.
-- Portais, instâncias e segredos duplicados entre empresas são recusados.
-- Administrador do cliente habilita o recebimento na ferramenta.
-- Webhook `/api/v1/integrations/whatsapp/{tenant_id}/events`.
-- HMAC-SHA256 dos bytes `timestamp + "." + corpo` com `X-Timestamp` e `X-Signature`.
-- Janela de 300 segundos, até 4096 bytes, conferindo instância, habilitação e licença.
-- Envelope com `id`, `type`, `instance_id`, `occurred_at`.
-- Tipos `message.received`, `message.status`, `instance.connection`.
-- Evento novo retorna `201`, repetição idêntica `200` e ID conflitante `409`.
-- Painel mostra últimos 25 eventos. Conteúdo, telefone e QR ficam na origem.
-
-O worker externo usa `WHATSAPP_OUTBOUND_WEBHOOKS`. Os UUIDs de empresa da FuturaNext e do WhatsApp têm papéis próprios. Contrato e adaptador Python em [INTEGRACOES_EXTERNAS.md](docs/INTEGRACOES_EXTERNAS.md).
+O recebimento antigo de metadados (`/api/v1/integrations/whatsapp/{tenant_id}/events`, `FN_EXTERNAL_INTEGRATIONS.whatsapp_*`) continua no código, mas o portal não o usa mais. Veja [INTEGRACOES_EXTERNAS.md](docs/INTEGRACOES_EXTERNAS.md).
 
 ### Adicionar uma ferramenta
 
@@ -383,8 +376,9 @@ Antes de ativar pagamentos reais, configure credenciais e homologue o formato at
 | `0009_billing` | Serviços e faturas |
 | `0010_user_deletion` | Exclusão pessoal, convites e auditoria |
 | `0011_billing_customer` | CPF/CNPJ, e-mail e telefone de cobrança da empresa e vínculo automático do cliente Asaas |
+| `0012_whatsapp_consent` | Aceite por e-mail do administrador que conecta o WhatsApp |
 
-Head atual `0011_billing_customer`. A readiness exige revisão exata, runtime `fn_app` e RLS ativo. Ao criar migração, ajuste `Database.ready()` e os testes dependentes da revisão.
+Head atual `0012_whatsapp_consent`. A readiness exige revisão exata, runtime `fn_app` e RLS ativo. Ao criar migração, ajuste `Database.ready()` e os testes dependentes da revisão.
 
 Migrações publicadas compõem o histórico. Evoluções posteriores recebem revisão nova, aplicada pela imagem que a contém.
 
@@ -536,6 +530,8 @@ Build `npm ci && npm run build`, saída `dist/` e três variáveis `PUBLIC_*` do
 
 ### API no Droplet
 
+> Passo a passo detalhado para o console web do DigitalOcean, com resultados esperados, configuração de chaves e retomada: [docs/ATUALIZAR_API.md](docs/ATUALIZAR_API.md).
+
 O push disponibiliza fontes. Imagem, Compose e migrações têm atualização própria.
 
 O checkout instalado pode estar em commit antigo com mudanças de implantação. O procedimento usa `git fetch` e `git archive` de um SHA definido para uma pasta nova, preservando os arquivos privados atuais.
@@ -572,7 +568,7 @@ migrate current
 migrate heads
 ~~~
 
-Confira revisão atual e head antes de aplicar. No código inspecionado, head `0010_user_deletion`. E-mail Zoho de `0626bb9` reutiliza essa revisão.
+Confira revisão atual e head antes de aplicar. No código inspecionado, head `0012_whatsapp_consent`.
 
 ### Backup antes da migração
 
@@ -694,7 +690,8 @@ Diretórios temporários de atendimentos anteriores pertencem a releases especí
 | Primeiro e-mail sem confirmação | `email_delivery`, OAuth, datacenter, caixa, remetente e variáveis do contêiner |
 | E-mail aceito pelo Zoho | Validar recebimento, botão, credencial e troca inicial |
 | Pagamento indisponível | Asaas, cliente do ambiente, serviços, webhook e homologação do checkout |
-| WhatsApp/Equinos sem endereço | `FN_EXTERNAL_INTEGRATIONS` e serviço externo por empresa |
+| WhatsApp "sendo preparada" | Variáveis `FN_WHATSAPP_*` e serviço `futuranext-whatsapp` ([guia](docs/WHATSAPP_PUBLICACAO.md)) |
+| Equinos sem endereço | `FN_EXTERNAL_INTEGRATIONS` por empresa |
 | Certificado indisponível | Chave, arquivo, MFA e perfil |
 | MFA por 15 dias | Confiança, expiração e revogação |
 | Robô fiscal | Executor e homologação do legado |
@@ -707,7 +704,7 @@ Prioridades comerciais conhecidas são vender ferramentas modularmente, aceitar 
 
 | Origem histórica | Uso |
 | --- | --- |
-| `C:\Projetos\Api_WhatsApp` | Plataforma e worker WhatsApp |
+| `C:\Projetos\Api_WhatsApp` | Origem do serviço, hoje em `whatsapp/` |
 | `C:\RPA\RPA_Cotacao_de_Seguro_V1.0` | Frontend e bot Equinos |
 | `G:\Meu Drive\JCBuso\Clemente_Pavan\Emissor_NFse_Nacional.zip` | Legado fiscal CCP |
 
@@ -724,6 +721,8 @@ São caminhos da máquina do responsável. Em outro ambiente, solicite localiza�
 - [Segurança](docs/SEGURANCA.md)
 - [Decisões](docs/DECISOES.md)
 - [Custos e fornecedores](docs/CUSTOS.md)
+- [Atualizar a API no Droplet](docs/ATUALIZAR_API.md)
+- [Publicar e usar o WhatsApp](docs/WHATSAPP_PUBLICACAO.md)
 - [Implantação histórica](docs/DEPLOY_DIGITALOCEAN.md) e [primeira publicação](docs/PRIMEIRA_PUBLICACAO.md)
 
 Guias antigos mencionam `0009_billing`, entrega manual da senha, ZIP ou desativação de deploy automático. Este README registra a instalação inspecionada com `0010`, Zoho inicial e Pages por GitHub. Confira código e ambiente ao retomar uma tarefa.

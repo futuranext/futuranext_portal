@@ -1,5 +1,7 @@
 # WhatsApp e Cotação de Seguros Equinos
 
+> **WhatsApp, 17/11/2026:** a ferramenta agora é integrada ao portal: aceite por e-mail, QR Code, webhook do bot e chaves. Veja [WHATSAPP_PUBLICACAO.md](WHATSAPP_PUBLICACAO.md). As seções de WhatsApp abaixo, com `FN_EXTERNAL_INTEGRATIONS`, `whatsapp_*` e o painel externo, descrevem o modelo anterior e continuam valendo apenas para o recebimento legado de metadados.
+
 As ferramentas aparecem no portal da empresa com licença e acesso ao produto. A configuração do serviço externo é feita pelo operador da FuturaNext por UUID de empresa. Cada portal mantém a própria autenticação. Os links abrem em outra aba e a FuturaNext entrega apenas os endereços registrados para a empresa autenticada.
 
 ## Configuração do runtime

@@ -2,7 +2,6 @@
 
 import os
 import re
-from datetime import datetime
 from time import time
 from typing import Literal
 from urllib.parse import urlsplit
@@ -15,7 +14,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     SecretStr,
-    StrictBool,
     TypeAdapter,
     ValidationError,
     field_validator,
@@ -25,7 +23,6 @@ from sqlalchemy import text
 
 from app.database import Database
 from app.dependencies import CurrentUser, Data, tenant_repository
-from app.repository import Repository
 
 from .access import require_tool
 from .external_whatsapp import (
@@ -33,7 +30,6 @@ from .external_whatsapp import (
     WEBHOOK_PATH,
     WhatsAppEvent,
     valid_signature,
-    webhook_path,
 )
 
 router = APIRouter(prefix="/api/v1/tenants/{tenant_id}/tools", tags=["Integrações externas"])
@@ -121,110 +117,11 @@ class PortalAccess(BaseModel):
     portal_url: str | None = None
 
 
-class EventSummary(BaseModel):
-    id: UUID
-    type: str
-    occurred_at: datetime
-    received_at: datetime
-
-
-class WhatsAppStatus(PortalAccess):
-    webhook_path: str | None = None
-    instance_id: UUID | None = None
-    enabled: bool = False
-    updated_at: datetime | None = None
-    recent_events: list[EventSummary]
-
-
-class WebhookPreference(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    enabled: StrictBool
-
-
-def whatsapp_status(
-    repo: Repository, tenant_id: UUID, config: ExternalIntegration
-) -> WhatsAppStatus:
-    instance = config.whatsapp_instance_id
-    if instance is None:
-        return WhatsAppStatus(portal_url=config.whatsapp_portal_url, recent_events=[])
-
-    parameters = {"tenant_id": tenant_id, "instance_id": instance}
-    setting = (
-        repo.connection.execute(
-            text("""
-            SELECT enabled, updated_at FROM futuranext.whatsapp_webhooks
-            WHERE tenant_id = :tenant_id AND instance_id = :instance_id
-        """),
-            parameters,
-        )
-        .mappings()
-        .one_or_none()
-    )
-    events = repo.connection.execute(
-        text("""
-            SELECT event_id AS id, kind AS type, occurred_at, received_at
-            FROM futuranext.whatsapp_events
-            WHERE tenant_id = :tenant_id AND instance_id = :instance_id
-            ORDER BY received_at DESC, event_id LIMIT 25
-        """),
-        parameters,
-    ).mappings()
-    return WhatsAppStatus(
-        portal_url=config.whatsapp_portal_url,
-        webhook_path=webhook_path(tenant_id),
-        instance_id=instance,
-        enabled=setting["enabled"] if setting else False,
-        updated_at=setting["updated_at"] if setting else None,
-        recent_events=[EventSummary.model_validate(event) for event in events],
-    )
-
-
 @router.get("/cotacao-seguros", response_model=PortalAccess)
 def equinos_portal(tenant_id: UUID, identity: CurrentUser, database: Data) -> PortalAccess:
     with tenant_repository(database, identity, tenant_id) as repo:
         require_tool(repo, tenant_id, "cotacao-seguros")
         return PortalAccess(portal_url=integration_for(tenant_id).equinos_portal_url)
-
-
-@router.get("/whatsapp", response_model=WhatsAppStatus)
-def get_whatsapp(tenant_id: UUID, identity: CurrentUser, database: Data) -> WhatsAppStatus:
-    with tenant_repository(database, identity, tenant_id) as repo:
-        require_tool(repo, tenant_id, "whatsapp")
-        return whatsapp_status(repo, tenant_id, integration_for(tenant_id))
-
-
-@router.put("/whatsapp/webhook", response_model=WhatsAppStatus)
-def set_whatsapp_webhook(
-    tenant_id: UUID,
-    preference: WebhookPreference,
-    identity: CurrentUser,
-    database: Data,
-) -> WhatsAppStatus:
-    with tenant_repository(database, identity, tenant_id) as repo:
-        require_tool(repo, tenant_id, "whatsapp", write=True)
-        config = integration_for(tenant_id)
-        if preference.enabled:
-            if config.whatsapp_instance_id is None:
-                raise HTTPException(409, "A instância do WhatsApp precisa ser vinculada primeiro.")
-            repo.connection.execute(
-                text("""
-                    INSERT INTO futuranext.whatsapp_webhooks AS existing (tenant_id, instance_id)
-                    VALUES (:tenant_id, :instance_id)
-                    ON CONFLICT (tenant_id) DO UPDATE SET
-                        instance_id = EXCLUDED.instance_id, enabled = true, updated_at = now()
-                    WHERE NOT existing.enabled OR existing.instance_id <> EXCLUDED.instance_id
-                """),
-                {"tenant_id": tenant_id, "instance_id": config.whatsapp_instance_id},
-            )
-        else:
-            repo.connection.execute(
-                text("""
-                    UPDATE futuranext.whatsapp_webhooks SET enabled = false, updated_at = now()
-                    WHERE tenant_id = :tenant_id AND enabled
-                """),
-                {"tenant_id": tenant_id},
-            )
-        return whatsapp_status(repo, tenant_id, config)
 
 
 def persist_event(database: Database, tenant_id: UUID, event: WhatsAppEvent) -> str:

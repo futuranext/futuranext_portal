@@ -144,6 +144,15 @@ void boot('portal', (initialContext) => {
   let request;
   let invitationRevision = 0;
 
+  // Links enviados por e-mail (ex.: aceite do WhatsApp) indicam a empresa em ?empresa=.
+  const url = new URL(location.href);
+  const requested = url.searchParams.get('empresa');
+  if (requested) {
+    if (context.organizations.some((org) => org.id === requested)) sessionStorage.setItem(key, requested);
+    url.searchParams.delete('empresa');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+  }
+
   function draw(message) {
     request?.abort();
     const saved = sessionStorage.getItem(key);

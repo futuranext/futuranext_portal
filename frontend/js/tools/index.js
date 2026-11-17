@@ -5,7 +5,7 @@ const modules = {
   'nfse-consulta': async () => (await import('./fiscal.js')).renderFiscal,
   clinica: async () => (await import('./agenda.js')).renderAgenda,
   barbearia: async () => (await import('./agenda.js')).renderAgenda,
-  whatsapp: async () => (await import('./integrations.js')).renderIntegration,
+  whatsapp: async () => (await import('./whatsapp.js')).renderWhatsApp,
   'cotacao-seguros': async () => (await import('./integrations.js')).renderIntegration,
 };
 

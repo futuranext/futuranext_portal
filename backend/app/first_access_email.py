@@ -127,7 +127,13 @@ class ZohoFirstAccessMailer:
             return token
 
     def send(self, *, frontend_url: str, recipient: str, temporary_password: str) -> bool:
-        # O provedor aceita listas em toAddress. A senha só pode ir para uma conta.
+        return self.deliver(
+            recipient=recipient, subject=SUBJECT,
+            html=first_access_html(frontend_url, recipient, temporary_password),
+        )
+
+    def deliver(self, *, recipient: str, subject: str, html: str) -> bool:
+        # O provedor aceita listas em toAddress. Cada mensagem só pode ir para uma conta.
         if any(separator in recipient for separator in ",;"):
             logger.warning("first_access_email_invalid_recipient")
             return False
@@ -141,9 +147,9 @@ class ZohoFirstAccessMailer:
                 json={
                     "fromAddress": self._sender_email,
                     "toAddress": recipient,
-                    "subject": SUBJECT,
+                    "subject": subject,
                     "mailFormat": "html",
-                    "content": first_access_html(frontend_url, recipient, temporary_password),
+                    "content": html,
                 },
                 timeout=REQUEST_TIMEOUT,
                 follow_redirects=False,

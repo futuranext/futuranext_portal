@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     zoho_mail_refresh_token: SecretStr | None = None
     zoho_mail_account_id: str | None = Field(default=None, pattern=r"^[0-9]{1,30}$")
     zoho_mail_sender: str | None = Field(default=None, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    whatsapp_service_url: str | None = None
+    whatsapp_service_token: SecretStr | None = None
+    whatsapp_public_api_url: str | None = None
     auth_mode: Literal["jwks", "remote"] = "jwks"
     frontend_url: str = "http://localhost:8088"
     cors_origins: list[str] = []
@@ -43,6 +46,17 @@ class Settings(BaseSettings):
             if value:
                 setattr(self, name, self._validate_url(value, hosted, name == "supabase_issuer"))
         self.cors_origins = [self._validate_url(origin, hosted) for origin in self.cors_origins]
+        if self.whatsapp_service_url:
+            # Endereço interno da rede Docker; nunca recebe tráfego público.
+            self.whatsapp_service_url = self._validate_url(self.whatsapp_service_url, False)
+        if self.whatsapp_public_api_url:
+            self.whatsapp_public_api_url = self._validate_url(
+                self.whatsapp_public_api_url, hosted, allow_path=True,
+            )
+        if bool(self.whatsapp_service_url) != bool(self.whatsapp_service_token):
+            raise ValueError("Configure o endereço e o token do serviço WhatsApp em conjunto.")
+        if self.whatsapp_service_token and len(self.whatsapp_service_token.get_secret_value()) < 32:
+            raise ValueError("O token do serviço WhatsApp precisa ter pelo menos 32 caracteres.")
 
         configured = (self.supabase_url, self.supabase_issuer, self.supabase_publishable_key)
         if any(configured) and not all(configured):
