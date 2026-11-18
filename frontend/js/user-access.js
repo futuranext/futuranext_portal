@@ -1,12 +1,11 @@
 import {api, resource} from './client.js';
 import {userRemoval, userRemovedMessage} from './remove-user.js';
-import {actionForm, checkField, dateTime, element, field, focusHeading, inputField, link, muted, notice, panel, roleNames, screen, select} from './ui.js';
+import {actionForm, checkField, combobox, dateTime, element, field, focusHeading, link, muted, notice, panel, roleNames, screen, select} from './ui.js';
 
 const clientRoles = ['cliente_usuario', 'cliente_admin'].map((role) => [role, roleNames[role]]);
 const outcomes = {pending: 'Em análise', approved: 'Aprovada', rejected: 'Recusada'};
 
 export function userAccess(currentUserId) {
-  const results = element('div', {class: 'stack'});
   const selected = element('div', {class: 'stack'});
   let loading;
   async function showAccess(account, signal, onRemoved) {
@@ -36,49 +35,38 @@ export function userAccess(currentUserId) {
       cards.length ? null : muted('Nenhuma empresa disponível para vincular a esta conta.'),
       userRemoval(account, {currentUserId, signal, onRemoved})));
   }
-  const search = actionForm([
-    inputField('E-mail da conta', 'q', {type: 'search', required: true, minlength: 2, maxlength: 254, autocomplete: 'off'}),
-  ], 'Buscar contas', async (data) => {
+  const accounts = new Map();
+  const control = select([['', 'Selecione uma conta']]);
+  control.options[0].disabled = true;
+  async function choose() {
     loading?.abort();
-    selected.replaceChildren();
-    results.replaceChildren();
-    const {q} = Object.fromEntries(data);
-    const accounts = await api(`/admin/access/users?q=${resource(q.trim())}`);
-    if (!accounts.length) {
-      results.replaceChildren(notice('Nenhuma conta encontrada.'), link('/admin/usuarios', 'Convidar novo usuário'));
-      return;
+    loading = new AbortController();
+    const {signal} = loading;
+    const account = accounts.get(control.value);
+    if (!account) return;
+    selected.replaceChildren(notice('Carregando acessos…'));
+    try {
+      await showAccess(account, signal, () => {
+        Array.from(control.options).find(({value}) => value === account.user_id)?.remove();
+        accounts.delete(account.user_id);
+        control.value = '';
+        selected.replaceChildren(notice(userRemovedMessage), link('/admin/usuarios', 'Cadastrar novo usuário'));
+        focusHeading(selected);
+      });
+    } catch (error) {
+      if (!signal.aborted) selected.replaceChildren(notice(error instanceof Error && error.message || 'Não foi possível buscar os acessos.', true));
     }
-    const options = [['', 'Selecione uma conta'], ...accounts.map(({user_id, email}) => [user_id, email])];
-    const control = select(options);
-    control.options[0].disabled = true;
-    async function choose() {
-      loading?.abort();
-      loading = new AbortController();
-      const {signal} = loading;
-      const account = accounts.find(({user_id}) => user_id === control.value);
-      if (!account) return;
-      selected.replaceChildren(notice('Carregando acessos…'));
-      try {
-        await showAccess(account, signal, () => {
-          const option = Array.from(control.options).find(({value}) => value === account.user_id);
-          option?.remove();
-          control.value = '';
-          if (control.options.length === 1) results.replaceChildren();
-          selected.replaceChildren(notice(userRemovedMessage), link('/admin/usuarios', 'Cadastrar novo usuário'));
-          focusHeading(selected);
-        });
-      } catch (error) {
-        if (!signal.aborted) selected.replaceChildren(notice(error instanceof Error && error.message || 'Não foi possível buscar os acessos.', true));
-      }
-    }
-    control.addEventListener('change', () => void choose());
-    results.replaceChildren(field('Conta', control));
-    if (accounts.length === 1) {
-      control.value = accounts[0].user_id;
-      await choose();
-    }
-  });
-  screen.replaceChildren(panel('Selecionar usuário', search, results), selected);
+  }
+  control.addEventListener('change', () => void choose());
+  const search = field('E-mail da conta', combobox(control, {
+    placeholder: 'Digite parte do e-mail',
+    source: async (term) => {
+      const found = await api(`/admin/access/users?q=${resource(term)}`);
+      for (const account of found) accounts.set(account.user_id, account);
+      return found.map(({user_id, email}) => [user_id, email]);
+    },
+  }), 'As contas aparecem enquanto você digita. Não encontrou? Convide em Usuários.');
+  screen.replaceChildren(panel('Selecionar usuário', search), selected);
 }
 
 export async function toolRequests() {

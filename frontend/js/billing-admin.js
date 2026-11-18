@@ -1,7 +1,7 @@
 import {api, resource} from './client.js';
 import {invoiceItems, invoiceRecords, money} from './billing-portal.js';
 import {
-  actionForm, button, checkField, element, field, inputField, muted, notice, panel,
+  actionForm, button, checkField, combobox, element, field, inputField, muted, notice, panel,
   runAction, select, statusMessage, UserMessage,
 } from './ui.js';
 
@@ -229,7 +229,7 @@ export async function renderBillingAdmin(target, {signal} = {}) {
   }
 
   picker.addEventListener('change', () => void openCompany());
-  target.replaceChildren(element('div', {class: 'tenant-picker'}, field('Empresa', picker)), content);
+  target.replaceChildren(element('div', {class: 'tenant-picker'}, field('Empresa', combobox(picker, {placeholder: 'Digite o nome da empresa'}))), content);
   if (companies.length === 1) {
     picker.value = companies[0].id;
     await openCompany();

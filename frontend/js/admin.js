@@ -2,7 +2,7 @@ import {api, resource} from './client.js';
 import {members} from './members.js';
 import {requireMfa} from './mfa.js';
 import {toolRequests, userAccess} from './user-access.js';
-import {actionForm, checkField, dateTime, element, field, inputField, link, muted, notice, panel, screen, select, UserMessage} from './ui.js';
+import {actionForm, checkField, combobox, dateTime, element, field, filterField, inputField, link, muted, notice, panel, screen, select, UserMessage} from './ui.js';
 import {boot, isStaff, navigation, view} from './workspace.js';
 
 const pages = [
@@ -68,6 +68,10 @@ async function catalog(canEdit, products) {
   const label = products ? 'produto' : 'empresa';
   const records = await api(path);
   const list = element('div', {class: 'stack compact'});
+  const filter = filterField(products ? 'Buscar produto' : 'Buscar empresa', list, {
+    placeholder: products ? 'Nome ou identificador' : 'Nome, identificador, CPF/CNPJ ou e-mail',
+    text: (node) => [node.textContent, ...Array.from(node.querySelectorAll('input'), (input) => input.value)].join(' '),
+  });
 
   function drawRecords() {
     list.replaceChildren(...records.map((item) => {
@@ -90,6 +94,7 @@ async function catalog(canEdit, products) {
       });
       return element('details', {class: 'edit-disclosure'}, summary, form);
     }));
+    filter.querySelector('input').dispatchEvent(new Event('input'));
     if (!records.length) list.append(muted(products ? 'Nenhum produto cadastrado.' : 'Nenhuma empresa disponível.'));
   }
 
@@ -106,7 +111,7 @@ async function catalog(canEdit, products) {
     return products ? 'Produto cadastrado.' : savedMessage('Empresa cadastrada.', records[0].billing_customer);
   })) : null;
 
-  screen.replaceChildren(...[create, panel(products ? 'Produtos cadastrados' : 'Empresas disponíveis', list)].filter(Boolean));
+  screen.replaceChildren(...[create, panel(products ? 'Produtos cadastrados' : 'Empresas disponíveis', records.length > 1 ? filter : null, list)].filter(Boolean));
 }
 
 async function overview(canEdit) {
@@ -217,7 +222,7 @@ async function companyManagement(canEdit, currentUserId) {
     }
   }
   control.addEventListener('change', () => void changeCompany());
-  screen.replaceChildren(element('div', {class: 'tenant-picker'}, field('Empresa', control)), target);
+  screen.replaceChildren(element('div', {class: 'tenant-picker'}, field('Empresa', combobox(control, {placeholder: 'Digite o nome da empresa'}))), target);
   if (companies.length === 1) {
     control.value = companies[0].id;
     await changeCompany();

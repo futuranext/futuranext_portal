@@ -1,7 +1,7 @@
 import {api, resource} from './client.js';
 import {members} from './members.js';
 import {requireMfa} from './mfa.js';
-import {button, dateTime, definitionList, element, field, link, muted, notice, panel, roleNames, runAction, screen, select, statusMessage, UserMessage} from './ui.js';
+import {button, combobox, dateTime, definitionList, element, field, link, muted, notice, panel, roleNames, runAction, screen, select, statusMessage, UserMessage} from './ui.js';
 import {boot, navigation, view} from './workspace.js';
 
 const pages = [
@@ -182,9 +182,10 @@ void boot('portal', (initialContext) => {
           history.replaceState(null, '', toolsPage);
         }
         draw();
-        screen.querySelector('.tenant-picker select')?.focus();
+        screen.querySelector('.tenant-picker input, .tenant-picker select')?.focus();
       });
-      picker = element('div', {class: 'tenant-picker'}, field('Empresa', control));
+      picker = element('div', {class: 'tenant-picker'}, field('Empresa', context.organizations.length > 1
+        ? combobox(control, {placeholder: 'Digite o nome da empresa'}) : control));
     } else {
       sessionStorage.removeItem(key);
     }
