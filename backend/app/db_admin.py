@@ -44,6 +44,44 @@ def setup_role(connection: Connection, password: str) -> None:
         cursor.execute(command.format(sql.Literal(verifier)))
 
 
+WHATSAPP_ROLES = ("wa_api", "wa_worker")
+
+
+def setup_whatsapp_role(connection: Connection, role_name: str, password: str) -> None:
+    """Ativa LOGIN com senha para um papel do serviço WhatsApp criado pela migração 0013."""
+    if role_name not in WHATSAPP_ROLES:
+        raise ValueError("Papel do serviço WhatsApp desconhecido.")
+    if len(password) < 24:
+        raise ValueError("As senhas dos papéis do WhatsApp precisam ter ao menos 24 caracteres.")
+    connection.execute(text("SELECT pg_advisory_xact_lock(hashtext('futuranext.runtime'))"))
+    role = (
+        connection.execute(
+            text("""
+        SELECT rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls,
+               EXISTS (SELECT 1 FROM pg_auth_members WHERE member = r.oid) AS has_parent_role
+        FROM pg_roles AS r WHERE rolname = :name
+    """),
+            {"name": role_name},
+        )
+        .mappings()
+        .one_or_none()
+    )
+    if role is None:
+        raise ValueError(f"O papel {role_name} não existe. Aplique a migração 0013 antes.")
+    if any(role.values()):
+        raise ValueError(f"O papel {role_name} tem configuração incompatível com runtime.")
+    driver: PsycopgConnection = connection.connection.driver_connection
+    verifier = driver.pgconn.encrypt_password(
+        password.encode(driver.info.encoding), role_name.encode(), b"scram-sha-256"
+    ).decode("ascii")
+    with driver.cursor() as cursor:
+        cursor.execute(
+            sql.SQL("ALTER ROLE {} LOGIN CONNECTION LIMIT 20 PASSWORD {}").format(
+                sql.Identifier(role_name), sql.Literal(verifier)
+            )
+        )
+
+
 def verified_profile(connection: Connection, user_id: UUID) -> None:
     email = connection.scalar(
         text("""
@@ -132,6 +170,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("setup-role")
+    commands.add_parser("setup-whatsapp-roles")
     bootstrap = commands.add_parser("bootstrap-admin")
     bootstrap.add_argument("user_id", type=UUID)
     for name in ("assign-support", "revoke-support"):
@@ -147,6 +186,11 @@ def main() -> None:
             with engine.begin() as connection:
                 if args.command == "setup-role":
                     setup_role(connection, os.environ["FN_APP_DB_PASSWORD"])
+                elif args.command == "setup-whatsapp-roles":
+                    setup_whatsapp_role(connection, "wa_api", os.environ["WA_API_DB_PASSWORD"])
+                    setup_whatsapp_role(
+                        connection, "wa_worker", os.environ["WA_WORKER_DB_PASSWORD"]
+                    )
                 elif args.command == "bootstrap-admin":
                     bootstrap_admin(connection, args.user_id)
                 elif args.command == "assign-support":
