@@ -3,19 +3,32 @@ from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from pydantic import AwareDatetime, BaseModel, Field, StringConstraints, field_validator
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import text
 
 from ..dependencies import CurrentUser, Data, require_permission, tenant_repository
 from ..repository import Record
-from ..schemas import BillingCustomerStatus, Input, Name
+from ..schemas import BillingCustomerStatus, BillingEmail, Document, Input, Name, Phone
 from .asaas import (
+    AsaasCardRefused,
     AsaasCharge,
     AsaasClient,
     AsaasError,
     AsaasRejected,
+    AsaasUncertainCreation,
+    CardHolder,
     ChargeRequest,
+    CreditCard,
     CustomerRequest,
 )
 from .billing_repository import BillingRepository
@@ -96,6 +109,64 @@ class Invoice(BaseModel):
     can_cancel: bool = False
     can_reconcile: bool = False
     reference: str | None = None
+
+
+class BoletoView(BaseModel):
+    identification_field: str
+    bar_code: str
+    pdf_url: str | None
+
+
+class PixView(BaseModel):
+    image: str
+    payload: str
+    expiration: str | None
+
+
+def luhn(number: str) -> bool:
+    total = 0
+    for index, digit in enumerate(int(char) for char in reversed(number)):
+        if index % 2:
+            digit = digit * 2 - 9 if digit > 4 else digit * 2
+        total += digit
+    return total % 10 == 0
+
+
+class CardInput(BaseModel):
+    """Dados do cartão: só trafegam até o Asaas. Não são gravados nem registrados em log."""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True, str_strip_whitespace=True)
+
+    holder_name: Annotated[str, StringConstraints(min_length=2, max_length=100)]
+    number: SecretStr
+    expiry_month: Annotated[int, Field(ge=1, le=12)]
+    expiry_year: Annotated[int, Field(ge=2000, le=2100)]
+    ccv: SecretStr
+    cpf_cnpj: Document
+    email: BillingEmail
+    phone: Phone
+    postal_code: Annotated[str, StringConstraints(pattern=r"^[0-9]{5}-?[0-9]{3}$")]
+    address_number: Annotated[str, StringConstraints(min_length=1, max_length=20)]
+
+    @model_validator(mode="after")
+    def validate_card(self) -> "CardInput":
+        number = "".join(self.number.get_secret_value().split())
+        if not (number.isdigit() and 13 <= len(number) <= 19 and luhn(number)):
+            raise ValueError("Número de cartão inválido.")
+        ccv = self.ccv.get_secret_value()
+        if not (ccv.isdigit() and len(ccv) in {3, 4}):
+            raise ValueError("Código de segurança inválido.")
+        current = today()
+        if (self.expiry_year, self.expiry_month) < (current.year, current.month):
+            raise ValueError("Cartão vencido.")
+        self.number = SecretStr(number)
+        return self
+
+
+class CardResult(BaseModel):
+    invoice: Invoice
+    message: str
+    challenge_url: str | None = None
 
 
 class PortalBilling(BaseModel):
@@ -426,25 +497,23 @@ def portal_billing(tenant_id: UUID, identity: CurrentUser, database: Data, reque
         )
 
 
-@router.post("/tenants/{tenant_id}/billing/invoices/{invoice_id}/payment", response_model=Invoice)
-def start_payment(
-    tenant_id: UUID, invoice_id: UUID, identity: CurrentUser, database: Data,
-    request: Request, provider: Asaas,
-):
-    mode = environment(request)
+def ensure_charge(
+    database, identity, tenant_id: UUID, invoice_id: UUID, mode: str, provider: AsaasClient | None,
+) -> Record:
+    """Garante a cobrança da fatura no Asaas (forma UNDEFINED) e devolve o registro atualizado."""
     with tenant_repository(database, identity, tenant_id) as repo:
         require_permission(repo, "tenant.access", status=404)
         billing = BillingRepository(repo.connection)
         billing.enable_portal_payment()
         invoice = found(billing.locked_invoice(invoice_id, tenant_id))
         if invoice["status"] in {"paid", "confirmed", "refunded", "cancelled", "review"}:
-            return invoice_view(invoice, mode)
+            return invoice
         if invoice["payment_url"] and invoice["environment"] == mode:
-            return invoice_view(invoice, mode)
+            return invoice
         if provider is None or invoice["environment"] != mode:
             raise HTTPException(503, "Integração Asaas indisponível para esta fatura.")
         if invoice["provider_state"] != "unsubmitted":
-            return invoice_view(sync_charge(billing, invoice, provider), mode)
+            return sync_charge(billing, invoice, provider)
         if invoice["due_date"] < today():
             raise HTTPException(409, "Solicite ao administrador um novo vencimento para esta fatura.")
         invoice = billing.update_payment(invoice, state="inflight", status="processing")
@@ -479,7 +548,157 @@ def start_payment(
             current = apply_charge(billing, current, charge)
         elif current["provider_state"] == "inflight" and current["status"] == "processing":
             current = billing.update_payment(current, state=state, status=status)
-        return invoice_view(current, mode)
+        return current
+
+
+def payable(invoice: Record, mode: str, provider: AsaasClient | None) -> str:
+    if provider is None or invoice["environment"] != mode:
+        raise HTTPException(503, "Integração Asaas indisponível para esta fatura.")
+    if invoice["status"] in {"paid", "confirmed", "refunded"}:
+        raise HTTPException(409, "Esta fatura já foi paga.")
+    if invoice["status"] not in {"open", "overdue"} or not invoice["provider_id"]:
+        raise HTTPException(
+            409, "O pagamento desta fatura está em processamento. Consulte novamente em instantes.",
+        )
+    return invoice["provider_id"]
+
+
+@router.post("/tenants/{tenant_id}/billing/invoices/{invoice_id}/payment", response_model=Invoice)
+def start_payment(
+    tenant_id: UUID, invoice_id: UUID, identity: CurrentUser, database: Data,
+    request: Request, provider: Asaas,
+):
+    mode = environment(request)
+    return invoice_view(ensure_charge(database, identity, tenant_id, invoice_id, mode, provider), mode)
+
+
+@router.post("/tenants/{tenant_id}/billing/invoices/{invoice_id}/payment/boleto", response_model=BoletoView)
+def boleto_payment(
+    tenant_id: UUID, invoice_id: UUID, identity: CurrentUser, database: Data,
+    request: Request, provider: Asaas,
+):
+    mode = environment(request)
+    payment_id = payable(
+        ensure_charge(database, identity, tenant_id, invoice_id, mode, provider), mode, provider,
+    )
+    try:
+        slip = provider.boleto(payment_id)
+        charge = provider.get_charge(payment_id)
+    except AsaasError as exc:
+        raise HTTPException(503, "O boleto está indisponível no momento. Tente novamente.") from exc
+    return BoletoView(
+        identification_field=slip.identification_field, bar_code=slip.bar_code,
+        pdf_url=charge.bank_slip_url,
+    )
+
+
+@router.get("/tenants/{tenant_id}/billing/invoices/{invoice_id}/payment/boleto.pdf")
+def boleto_pdf(
+    tenant_id: UUID, invoice_id: UUID, identity: CurrentUser, database: Data,
+    request: Request, provider: Asaas,
+):
+    mode = environment(request)
+    with tenant_repository(database, identity, tenant_id) as repo:
+        require_permission(repo, "tenant.access", status=404)
+        billing = BillingRepository(repo.connection)
+        billing.enable_portal_payment()
+        invoice = found(billing.locked_invoice(invoice_id, tenant_id))
+    payment_id = payable(invoice, mode, provider)
+    try:
+        url = provider.get_charge(payment_id).bank_slip_url
+        if url is None:
+            raise HTTPException(409, "O PDF do boleto ainda não está disponível.")
+        content = provider.bank_slip_pdf(url)
+    except AsaasError as exc:
+        raise HTTPException(503, "O PDF do boleto está indisponível. Tente novamente.") from exc
+    filename = f"boleto-futuranext-{invoice['period']:%Y-%m}.pdf"
+    return Response(content, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    })
+
+
+@router.post("/tenants/{tenant_id}/billing/invoices/{invoice_id}/payment/pix", response_model=PixView)
+def pix_payment(
+    tenant_id: UUID, invoice_id: UUID, identity: CurrentUser, database: Data,
+    request: Request, provider: Asaas,
+):
+    mode = environment(request)
+    payment_id = payable(
+        ensure_charge(database, identity, tenant_id, invoice_id, mode, provider), mode, provider,
+    )
+    try:
+        pix = provider.pix(payment_id)
+    except AsaasError as exc:
+        raise HTTPException(503, "O Pix está indisponível no momento. Tente novamente.") from exc
+    return PixView(
+        image=f"data:image/png;base64,{pix.encoded_image}", payload=pix.payload,
+        expiration=pix.expiration,
+    )
+
+
+CARD_MESSAGES = {
+    "confirmed": "Pagamento aprovado. Obrigado!",
+    "paid": "Pagamento aprovado. Obrigado!",
+    "processing": "Pagamento em análise pelo Asaas. Você será avisado quando for confirmado.",
+}
+
+
+@router.post("/tenants/{tenant_id}/billing/invoices/{invoice_id}/payment/card", response_model=CardResult)
+def card_payment(
+    tenant_id: UUID, invoice_id: UUID, card: CardInput, identity: CurrentUser, database: Data,
+    request: Request, provider: Asaas,
+):
+    mode = environment(request)
+    payable(ensure_charge(database, identity, tenant_id, invoice_id, mode, provider), mode, provider)
+    with tenant_repository(database, identity, tenant_id) as repo:
+        require_permission(repo, "tenant.access", status=404)
+        billing = BillingRepository(repo.connection)
+        billing.enable_portal_payment()
+        # A trava da fatura impede dois pagamentos simultâneos da mesma cobrança.
+        invoice = found(billing.locked_invoice(invoice_id, tenant_id))
+        payment_id = payable(invoice, mode, provider)
+        try:
+            invoice = apply_charge(billing, invoice, provider.get_charge(payment_id))
+        except AsaasError as exc:
+            raise HTTPException(503, "Não foi possível consultar a cobrança no Asaas.") from exc
+        payment_id = payable(invoice, mode, provider)
+        try:
+            charge = provider.pay_with_card(
+                payment_id,
+                CreditCard(
+                    holder_name=card.holder_name, number=card.number.get_secret_value(),
+                    expiry_month=f"{card.expiry_month:02d}", expiry_year=str(card.expiry_year),
+                    ccv=card.ccv.get_secret_value(),
+                ),
+                CardHolder(
+                    name=card.holder_name, email=card.email, cpf_cnpj=card.cpf_cnpj,
+                    postal_code=card.postal_code.replace("-", ""),
+                    address_number=card.address_number, phone=card.phone,
+                ),
+            )
+        except AsaasCardRefused as exc:
+            raise HTTPException(422, str(exc)) from None
+        except AsaasUncertainCreation:
+            invoice = billing.update_payment(
+                invoice, state="linked", status="processing", provider_id=payment_id,
+            )
+            return CardResult(
+                invoice=invoice_view(invoice, mode),
+                message="Não recebemos a confirmação do Asaas. Não pague de novo: consulte em instantes.",
+            )
+        except AsaasError as exc:
+            raise HTTPException(503, "O pagamento com cartão está indisponível agora.") from exc
+        invoice = apply_charge(billing, invoice, charge)
+        view = invoice_view(invoice, mode)
+        if charge.challenge_url:
+            return CardResult(
+                invoice=view, challenge_url=charge.challenge_url,
+                message="O banco emissor pediu uma confirmação adicional. Conclua na página do banco.",
+            )
+        return CardResult(
+            invoice=view,
+            message=CARD_MESSAGES.get(view.status, "Situação do pagamento atualizada."),
+        )
 
 
 @router.post("/integrations/asaas/events", include_in_schema=False)

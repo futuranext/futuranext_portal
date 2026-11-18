@@ -251,7 +251,7 @@ Reconecte o console e recrie as variáveis, trocando a pasta pela anotada no Pas
 ```bash
 cd /opt/futuranext/futuranext_portal
 umask 077
-release=/opt/futuranext/deploy-SHA.XXXXXX
+release=/opt/futuranext/deploy-046b163.QRBVHX
 short=SHA_CURTO
 image="futuranext-api:$short"
 migrate() {

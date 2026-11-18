@@ -29,6 +29,7 @@ class SimulatedAsaas:
         self.customers = {}
         self.customer_posts = []
         self.customer_updates = []
+        self.card_requests = []
         self.reads = 0
         self.timeout_after_charge = False
         self.suffix = uuid4().hex[:8]
@@ -58,7 +59,40 @@ class SimulatedAsaas:
             customer.update(json.loads(request.content))
         return httpx.Response(200, json=customer)
 
+    def method(self, request: httpx.Request) -> httpx.Response | None:
+        path = request.url.path
+        if request.url.host == "sandbox.asaas.com" and path.startswith("/b/pdf/"):
+            return httpx.Response(200, content=b"%PDF-1.4 boleto simulado",
+                                  headers={"content-type": "application/pdf"})
+        parts = path.split("/")
+        if len(parts) != 5 or parts[3] not in self.charges:
+            return None
+        charge = self.charges[parts[3]]
+        if parts[4] == "identificationField":
+            return httpx.Response(200, json={
+                "identificationField": "23793.38128 60000.000003 00000.000400 1 84340000012345",
+                "nossoNumero": "1", "barCode": "2379" + "8" * 40,
+            })
+        if parts[4] == "pixQrCode":
+            return httpx.Response(200, json={
+                "encodedImage": "iVBORw0KGgo" + "A" * 120, "payload": "00020101021226" + "9" * 40,
+                "expirationDate": "2026-12-31 23:59:59",
+            })
+        if parts[4] == "payWithCreditCard":
+            data = json.loads(request.content)
+            self.card_requests.append(data)
+            if data["creditCard"]["holderName"] == "CARTAO RECUSADO":
+                return httpx.Response(400, json={"errors": [{
+                    "code": "invalid_creditCard",
+                    "description": "Transação não autorizada. Verifique os dados do cartão.",
+                }]})
+            charge.update(status="CONFIRMED", billingType="CREDIT_CARD")
+            return httpx.Response(200, json=charge)
+        return None
+
     def handle(self, request: httpx.Request) -> httpx.Response:
+        if (response := self.method(request)) is not None:
+            return response
         assert request.url.host == "api-sandbox.asaas.com"
         if request.url.path.startswith("/v3/customers"):
             return self.customer(request)
@@ -72,6 +106,7 @@ class SimulatedAsaas:
             charge = {
                 **data, "id": f"pay_mock_{self.suffix}_{number}", "status": "PENDING",
                 "invoiceUrl": f"https://sandbox.asaas.com/i/mock-{number}",
+                "bankSlipUrl": f"https://sandbox.asaas.com/b/pdf/mock-{number}",
             }
             self.charges[charge["id"]] = charge
             if self.timeout_after_charge:
@@ -300,3 +335,49 @@ def test_manual_customer_link_disables_paid_notifications(billing: BillingFlow):
     customer = f"cus_{billing.platform.suffix}"
     assert billing.provider.customers[customer]["notificationDisabled"] is True
     assert {"notificationDisabled": True} in billing.provider.customer_updates
+
+
+CARD = {
+    "holder_name": "MARIA DA SILVA", "number": "4111 1111 1111 1111", "expiry_month": 12,
+    "expiry_year": 2099, "ccv": "123", "cpf_cnpj": "529.982.247-25", "email": "maria@example.com",
+    "phone": "(11) 99999-0000", "postal_code": "01310-100", "address_number": "100",
+}
+
+
+def test_portal_pays_by_boleto_pix_and_card(billing: BillingFlow):
+    billing.add_service("Hospedagem", 6000)
+    boleto_invoice = billing.issue("2026-11")
+    base = f"{billing.portal_path}/invoices/{boleto_invoice['id']}/payment"
+
+    slip = billing.api.post(base + "/boleto", headers=billing.client)
+    assert slip.status_code == 200, slip.text
+    assert slip.json()["identification_field"].isdigit()
+    assert slip.json()["pdf_url"].startswith("https://sandbox.asaas.com/b/pdf/")
+    pdf = billing.api.get(base + "/boleto.pdf", headers=billing.client)
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF-")
+    assert "attachment" in pdf.headers["content-disposition"]
+
+    pix = billing.api.post(base + "/pix", headers=billing.client).json()
+    assert pix["image"].startswith("data:image/png;base64,") and pix["payload"].startswith("000201")
+    assert len(billing.provider.created) == 1  # boleto e Pix usam a mesma cobrança
+    assert billing.api.post(base + "/pix", headers=billing.other).status_code == 404
+
+    refused = billing.api.post(base + "/card", headers=billing.client,
+                               json={**CARD, "holder_name": "CARTAO RECUSADO"})
+    assert refused.status_code == 422
+    assert "não autorizada" in refused.json()["detail"]
+
+    assert billing.api.post(base + "/card", headers=billing.client,
+                            json={**CARD, "number": "4111 1111 1111 1112"}).status_code == 422
+    paid = billing.api.post(base + "/card", headers=billing.client, json=CARD)
+    assert paid.status_code == 200, paid.text
+    assert paid.json()["invoice"]["status"] == "confirmed"
+    sent = billing.provider.card_requests[-1]
+    assert sent["creditCard"]["number"] == "4111111111111111"
+    assert sent["creditCardHolderInfo"]["postalCode"] == "01310100"
+    assert sent["creditCardHolderInfo"]["cpfCnpj"] == "52998224725"
+    assert "4111" not in paid.text
+
+    again = billing.api.post(base + "/card", headers=billing.client, json=CARD)
+    assert again.status_code == 409
+    assert len(billing.provider.card_requests) == 2

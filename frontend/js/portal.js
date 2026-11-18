@@ -7,7 +7,7 @@ import {boot, navigation, view} from './workspace.js';
 const pages = [
   ['/portal', 'Visão geral', 'overview'],
   ['/portal/produtos', 'Ferramentas', 'products'],
-  ['/portal/cobrancas', 'Cobranças', 'billing'],
+  ['/portal/pagamento', 'Pagamento', 'billing'],
   ['/portal/perfil', 'Meu perfil', 'profile'],
 ];
 

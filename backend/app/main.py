@@ -41,6 +41,7 @@ PAGES = {
     "portal/produtos": "portal/produtos.html",
     "portal/perfil": "portal/perfil.html",
     "portal/usuarios": "portal/usuarios.html",
+    "portal/pagamento": "portal/pagamento.html",
     "portal/cobrancas": "portal/cobrancas.html",
     "admin": "admin.html",
     "admin/clientes": "admin/clientes.html",

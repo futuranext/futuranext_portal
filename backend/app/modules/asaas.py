@@ -27,6 +27,8 @@ CUSTOMER_ID = re.compile(r"cus_[A-Za-z0-9_-]{1,120}")
 PAYMENT_ID = re.compile(r"pay_[A-Za-z0-9_-]{1,120}")
 REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}")
 INVOICE_PATH = re.compile(r"/i/[A-Za-z0-9_-]{1,160}/?")
+BANK_SLIP_PATH = re.compile(r"/b/pdf/[A-Za-z0-9_-]{1,160}/?")
+MAX_PDF_BYTES = 3 * 1024 * 1024
 PAYMENT_STATUS = re.compile(r"[A-Z][A-Z0-9_]{0,59}")
 
 
@@ -96,6 +98,46 @@ class AsaasCharge:
     invoice_url: str | None = field(repr=False)
     deleted: bool = False
     original_amount_cents: int | None = None
+    bank_slip_url: str | None = field(default=None, repr=False)
+    challenge_url: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class AsaasBoleto:
+    identification_field: str
+    bar_code: str
+
+
+@dataclass(frozen=True)
+class AsaasPix:
+    encoded_image: str = field(repr=False)
+    payload: str = field(repr=False)
+    expiration: str | None = None
+
+
+@dataclass(frozen=True)
+class CreditCard:
+    """Dados do cartão usados só na chamada ao Asaas. Nunca registrar nem persistir."""
+
+    holder_name: str
+    number: str = field(repr=False)
+    expiry_month: str = field(repr=False)
+    expiry_year: str = field(repr=False)
+    ccv: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class CardHolder:
+    name: str
+    email: str
+    cpf_cnpj: str
+    postal_code: str
+    address_number: str
+    phone: str
+
+
+class AsaasCardRefused(AsaasError):
+    """O Asaas recusou o pagamento com cartão. A mensagem pode ser mostrada ao pagador."""
 
 
 @dataclass(frozen=True)
@@ -146,6 +188,46 @@ def hosted_invoice_url(value: object, environment: AsaasEnvironment) -> str | No
     except ValueError:
         return None
     return f"https://{hostname}{url.path}"
+
+
+def bank_slip_url(value: object, environment: AsaasEnvironment) -> str | None:
+    if not isinstance(value, str) or not value or any(not 32 < ord(char) < 127 for char in value):
+        return None
+    try:
+        url = urlsplit(value)
+        hostname = url.hostname
+        if (
+            url.scheme != "https" or hostname not in INVOICE_HOSTS.get(environment, ())
+            or url.username is not None or url.password is not None
+            or url.port not in (None, 443) or url.query or url.fragment
+            or not BANK_SLIP_PATH.fullmatch(url.path)
+        ):
+            return None
+    except ValueError:
+        return None
+    return f"https://{hostname}{url.path}"
+
+
+def _challenge_url(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 2048:
+        return None
+    try:
+        url = urlsplit(value)
+    except ValueError:
+        return None
+    if url.scheme != "https" or not url.hostname or url.username is not None:
+        return None
+    return value
+
+
+def _refusal(response: httpx.Response) -> str:
+    try:
+        description = response.json()["errors"][0]["description"]
+    except (ValueError, AttributeError, TypeError, KeyError, IndexError):
+        description = None
+    if isinstance(description, str) and 0 < len(description) <= 300:
+        return description
+    return "Pagamento não autorizado. Confira os dados do cartão e tente novamente."
 
 
 def _customer_payload(request: CustomerRequest) -> dict:
@@ -308,6 +390,90 @@ class AsaasClient:
             raise AsaasReconciliationError("O cliente retornado não corresponde à empresa.")
         return customers[0]
 
+    def boleto(self, payment_id: str) -> AsaasBoleto:
+        if not PAYMENT_ID.fullmatch(payment_id):
+            raise AsaasRejected("Identificador de cobrança Asaas inválido.")
+        data = self._request("GET", f"/payments/{payment_id}/identificationField")
+        line, bar = data.get("identificationField"), data.get("barCode")
+        if not (isinstance(line, str) and re.fullmatch(r"[0-9 .]{40,60}", line)
+                and isinstance(bar, str) and re.fullmatch(r"[0-9]{44}", bar)):
+            raise AsaasReconciliationError("O Asaas não retornou a linha digitável do boleto.")
+        return AsaasBoleto(re.sub(r"[^0-9]", "", line), bar)
+
+    def pix(self, payment_id: str) -> AsaasPix:
+        if not PAYMENT_ID.fullmatch(payment_id):
+            raise AsaasRejected("Identificador de cobrança Asaas inválido.")
+        data = self._request("GET", f"/payments/{payment_id}/pixQrCode")
+        image, payload = data.get("encodedImage"), data.get("payload")
+        expiration = data.get("expirationDate")
+        if not (isinstance(image, str) and re.fullmatch(r"[A-Za-z0-9+/=]{100,400000}", image)
+                and isinstance(payload, str) and 20 <= len(payload) <= 1000
+                and all(32 <= ord(char) < 127 for char in payload)):
+            raise AsaasReconciliationError("O Asaas não retornou o QR Code Pix.")
+        return AsaasPix(image, payload, expiration if isinstance(expiration, str) else None)
+
+    def bank_slip_pdf(self, url: str) -> bytes:
+        if bank_slip_url(url, self.config.environment) != url:
+            raise AsaasRejected("Endereço do boleto inválido.")
+        try:
+            with self.client.stream(
+                "GET", url, headers={"user-agent": "FuturaNext/1.0"},
+                follow_redirects=True, timeout=15,
+            ) as response:
+                if not response.is_success:
+                    raise AsaasUnavailable("O PDF do boleto está indisponível.", response.status_code)
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    content += chunk
+                    if len(content) > MAX_PDF_BYTES:
+                        raise AsaasReconciliationError("O PDF do boleto excede o tamanho esperado.")
+        except httpx.RequestError:
+            raise AsaasUnavailable("O PDF do boleto está indisponível.") from None
+        if not content.startswith(b"%PDF-"):
+            raise AsaasReconciliationError("O Asaas não retornou um PDF.")
+        return bytes(content)
+
+    def pay_with_card(self, payment_id: str, card: CreditCard, holder: CardHolder) -> AsaasCharge:
+        """Paga a cobrança na hora. Não é idempotente: em resultado incerto, consulte antes."""
+        if not PAYMENT_ID.fullmatch(payment_id):
+            raise AsaasRejected("Identificador de cobrança Asaas inválido.")
+        body = {
+            "creditCard": {
+                "holderName": card.holder_name, "number": card.number,
+                "expiryMonth": card.expiry_month, "expiryYear": card.expiry_year, "ccv": card.ccv,
+            },
+            "creditCardHolderInfo": {
+                "name": holder.name, "email": holder.email, "cpfCnpj": holder.cpf_cnpj,
+                "postalCode": holder.postal_code, "addressNumber": holder.address_number,
+                "phone": holder.phone,
+            },
+        }
+        base = API_BASE_URLS[self.config.environment]
+        try:
+            response = self.client.request(
+                "POST", f"{base}/payments/{payment_id}/payWithCreditCard",
+                headers={"accept": "application/json", "user-agent": "FuturaNext/1.0",
+                         "access_token": self.config.api_key},
+                json=body, follow_redirects=False, timeout=30,
+            )
+        except httpx.RequestError:
+            raise AsaasUncertainCreation("O resultado do pagamento com cartão é incerto.") from None
+        if response.status_code == 400:
+            raise AsaasCardRefused(_refusal(response), 400)
+        if not response.is_success:
+            if response.status_code in {401, 403, 404, 429}:
+                raise AsaasUnavailable(
+                    "O Asaas está indisponível para esta operação.", response.status_code,
+                )
+            raise AsaasUncertainCreation(
+                "O resultado do pagamento com cartão é incerto.", response.status_code,
+            )
+        try:
+            data = response.json(parse_float=Decimal)
+        except (ValueError, DecimalException):
+            raise AsaasUncertainCreation("Resposta inválida do pagamento com cartão.") from None
+        return self._charge(data)
+
     def get_customer(self, customer_id: str) -> AsaasCustomer:
         if not CUSTOMER_ID.fullmatch(customer_id):
             raise AsaasRejected("Identificador de cliente Asaas inválido.")
@@ -422,6 +588,8 @@ class AsaasClient:
                 invoice,
                 deleted,
                 _amount_cents(original) if original is not None else None,
+                bank_slip_url(data.get("bankSlipUrl"), self.config.environment),
+                _challenge_url(data.get("threeDSecureChallengeUrl")),
             )
         except (TypeError, KeyError, ValueError, OverflowError, DecimalException):
             raise AsaasReconciliationError(

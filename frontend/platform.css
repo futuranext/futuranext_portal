@@ -126,3 +126,6 @@ p { overflow-wrap: anywhere; }
 .panel pre { margin: 0; padding: .9rem 1rem; overflow-x: auto; border-radius: 8px; background: #0b2233; color: #e6f6ee; font-size: .85rem; line-height: 1.5; }
 .panel img[alt^="QR Code"] { width: min(100%, 264px); height: auto; padding: .6rem; background: #fff; border: 1px solid var(--border); border-radius: 10px; }
 .panel ul:not(.record-list) { margin: 0; padding-left: 1.2rem; display: grid; gap: .4rem; }
+.payment-options { flex-basis: 100%; padding: .9rem; border: 1px solid var(--border); border-radius: 10px; background: #fbfdfc; }
+.payment-options .button[aria-pressed="true"] { background: var(--pale-green); border-color: var(--green-dark); }
+.payment-qr { width: min(100%, 240px); height: auto; padding: .5rem; background: #fff; border: 1px solid var(--border); border-radius: 10px; }

@@ -257,3 +257,32 @@ def test_customer_creation_rejection_is_reported():
     rejected = mock_client(lambda request: httpx.Response(400, json={"errors": []}))
     with rejected as transport, pytest.raises(AsaasRejected):
         AsaasClient(transport, AsaasConfig("synthetic-key")).create_customer(customer_request())
+
+
+def test_bank_slip_url_accepts_only_asaas_pdf_paths():
+    from app.modules.asaas import bank_slip_url
+    assert bank_slip_url("https://sandbox.asaas.com/b/pdf/abc123", "sandbox") == (
+        "https://sandbox.asaas.com/b/pdf/abc123")
+    for value in ("https://evil.example/b/pdf/abc", "http://sandbox.asaas.com/b/pdf/abc",
+                  "https://sandbox.asaas.com/i/abc", "https://sandbox.asaas.com/b/pdf/abc?x=1"):
+        assert bank_slip_url(value, "sandbox") is None
+    assert bank_slip_url("https://sandbox.asaas.com/b/pdf/abc", "production") is None
+
+
+def test_card_refusal_message_comes_from_asaas_and_uncertainty_is_reported():
+    from app.modules.asaas import AsaasCardRefused, CardHolder, CreditCard
+    card = CreditCard("MARIA", "4111111111111111", "12", "2099", "123")
+    holder = CardHolder("MARIA", "m@example.com", "52998224725", "01310100", "100", "11999990000")
+
+    def refused(request):
+        return httpx.Response(400, json={"errors": [{"code": "x", "description": "Cartão recusado."}]})
+
+    with mock_client(refused) as transport, pytest.raises(AsaasCardRefused, match="Cartão recusado."):
+        AsaasClient(transport, AsaasConfig("synthetic-key")).pay_with_card("pay_x", card, holder)
+
+    def offline(request):
+        raise httpx.ReadTimeout("sem resposta", request=request)
+
+    with mock_client(offline) as transport, pytest.raises(AsaasUncertainCreation):
+        AsaasClient(transport, AsaasConfig("synthetic-key")).pay_with_card("pay_x", card, holder)
+    assert "4111" not in repr(card)

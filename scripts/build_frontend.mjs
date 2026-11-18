@@ -99,7 +99,9 @@ const portalRoutes = [
   ['portal/produtos', 'Ferramentas', 'products'],
   ['portal/perfil', 'Meu perfil', 'profile'],
   ['portal/usuarios', 'Usuários da empresa', 'members'],
-  ['portal/cobrancas', 'Cobranças', 'billing'],
+  ['portal/pagamento', 'Pagamento', 'billing'],
+  // Endereço antigo mantido para links já enviados.
+  ['portal/cobrancas', 'Pagamento', 'billing'],
 ];
 const adminRoutes = [
   ['admin', 'Visão geral', 'overview'],

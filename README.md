@@ -318,7 +318,7 @@ Para telas e dados próprios
 2. Ao liberar o primeiro usuário, o cliente Asaas (`cus_…`) é criado e vinculado automaticamente. Em **Administração → Cobranças**, o painel **Cliente Asaas** mostra o estado e oferece **Criar cliente no Asaas agora** ou o vínculo manual de um cliente existente.
 3. Em **Serviços mensais**, cadastre ou abra o serviço e edite **Valor mensal em reais**.
 4. Gere fatura com competência e vencimento.
-5. O cliente abre o pagamento em **Portal → Cobranças**.
+5. O cliente paga em **Portal → Pagamento** (`/portal/pagamento`; `/portal/cobrancas` continua abrindo a mesma tela), escolhendo boleto, Pix ou cartão de crédito sem sair do portal.
 
 ### Regras
 
@@ -336,7 +336,11 @@ Para telas e dados próprios
 - Unicidade por empresa/competência considera cancelamento e existência de cobrança externa.
 - Vencimento atual ou futuro no fuso de São Paulo.
 - A fatura local precede o checkout. Iniciar pagamento cria cobrança Asaas com `billingType=UNDEFINED`.
-- Boleto, Pix e Cartão dependem dos meios habilitados no Asaas. Dados de cartão são recebidos no checkout hospedado.
+- A mesma cobrança `UNDEFINED` atende os três meios, sem trocar `billingType`:
+  - **Boleto** `POST .../payment/boleto` devolve a linha digitável (`/identificationField`) e o endereço do PDF (`bankSlipUrl`, aceito só em `/b/pdf/` do host Asaas do ambiente). `GET .../payment/boleto.pdf` baixa o PDF pela API, com limite de 3 MB. O portal oferece copiar o código, abrir o boleto e baixar o PDF.
+  - **Pix** `POST .../payment/pix` devolve o QR Code (`/pixQrCode`, `encodedImage`) e o copia e cola. Em produção, mantenha uma chave Pix cadastrada no Asaas. Sem ela, o QR dinâmico vale só até 23h59 do dia.
+  - **Cartão** `POST .../payment/card` recebe os dados do cartão e do titular (nome, CPF/CNPJ, e-mail, telefone, CEP e número) e chama `/payWithCreditCard`. O número passa pelo algoritmo de Luhn e a validade é conferida. Os dados não são gravados nem registrados em log. A fatura fica travada durante a chamada e o estado é consultado antes, o que impede pagar duas vezes. Recusa vira `422` com a mensagem do Asaas. Resposta incerta deixa a fatura `processing`, sem repetir a cobrança, até a consulta ou o webhook. Desafio 3DS devolve `challenge_url`.
+  - Como os dados do cartão passam pela API, o ambiente entra no escopo PCI-DSS. HTTPS é obrigatório. Se o Asaas habilitar a tokenização na conta, considere migrar.
 - Referência `futuranext:invoice:<uuid>`.
 - Estados do provedor `unsubmitted`, `inflight`, `uncertain`, `linked`, `rejected`.
 - Resposta incerta exige conciliação por referência antes de outra cobrança.
