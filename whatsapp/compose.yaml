@@ -1,6 +1,11 @@
 # Serviço WhatsApp da FuturaNext no Droplet. Projeto Compose separado da API do portal.
 # A API do portal e o Caddy alcançam o backend pela rede futuranext_default com o nome whatsapp-api.
 # Nenhuma porta é publicada no host. Variáveis em .env (veja docs/WHATSAPP_PUBLICACAO.md).
+#
+# Persistência: os dados do serviço ficam no PostgreSQL do Supabase do portal (schema privado
+# whatsapp, migração Alembic 0013), acessado pelos papéis wa_api (backend) e wa_worker (worker).
+# TEMPORÁRIO: a Evolution continua com PostgreSQL local (evolution-postgres) até a homologação do
+# schema `evolution` no Supabase ser aprovada (docs/WHATSAPP_POSTGRES.md, seção Evolution).
 name: futuranext-whatsapp
 
 x-health: &health
@@ -16,23 +21,6 @@ x-logging: &logging
     max-file: "3"
 
 services:
-  mongo:
-    image: mongo:8.0.38
-    restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME:?Informe MONGO_USERNAME}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Informe MONGO_PASSWORD}
-      MONGO_INITDB_DATABASE: platform
-      APP_MONGO_PASSWORD: ${APP_MONGO_PASSWORD:?Informe APP_MONGO_PASSWORD}
-    volumes:
-      - mongo_data:/data/db
-      - ./infra/mongo-init.js:/docker-entrypoint-initdb.d/10-platform-user.js:ro
-    networks: [data]
-    logging: *logging
-    healthcheck:
-      <<: *health
-      test: [CMD-SHELL, 'mongosh --quiet --eval "db.adminCommand({ping:1}).ok" --username "$${MONGO_INITDB_ROOT_USERNAME}" --password "$${MONGO_INITDB_ROOT_PASSWORD}" --authenticationDatabase admin | grep 1']
-
   redis:
     image: redis:8.6.8-alpine3.23
     restart: unless-stopped
@@ -46,6 +34,7 @@ services:
       <<: *health
       test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep PONG']
 
+  # TEMPORÁRIO: banco próprio da Evolution (Prisma). Não publicar porta; manter backup do volume.
   evolution-postgres:
     image: postgres:15.19-alpine3.23
     restart: unless-stopped
@@ -114,11 +103,13 @@ services:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:8080/',{headers:{apikey:process.env.AUTHENTICATION_API_KEY,Origin:'http://backend:8000'},signal:AbortSignal.timeout(3000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
   backend:
-    image: ${WA_IMAGE:-futuranext-whatsapp:local}
+    # Tag do commit homologado, ex.: futuranext-whatsapp:3f2c1ab (veja docs/WHATSAPP_PUBLICACAO.md).
+    image: ${WA_IMAGE:?Informe WA_IMAGE com a tag do commit}
     build: ./backend
     restart: unless-stopped
     environment: &backend_env
-      MONGO_URI: mongodb://platform_app:${APP_MONGO_PASSWORD}@mongo:27017/platform?authSource=platform
+      WA_DATABASE_URL: ${WA_API_DATABASE_URL:?Informe WA_API_DATABASE_URL (papel wa_api)}
+      WA_DATABASE_POOL_SIZE: ${WA_API_POOL_SIZE:-3}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       EVOLUTION_URL: http://evolution:8080
       EVOLUTION_API_KEY: ${EVOLUTION_API_KEY}
@@ -126,12 +117,10 @@ services:
       AUTH_PEPPER: ${AUTH_PEPPER:?Informe AUTH_PEPPER}
       PORTAL_SERVICE_TOKEN: ${PORTAL_SERVICE_TOKEN:?Informe PORTAL_SERVICE_TOKEN}
       WEBHOOK_BASE_URL: http://backend:8000
-      FRONTEND_ORIGINS: https://futuranext.com.br
-      COOKIE_SECURE: 'true'
       DOCS_ENABLED: 'false'
-      ASAAS_ENABLED: 'false'
+    volumes: &supabase_ca
+      - ${SUPABASE_CA_FILE:?Informe SUPABASE_CA_FILE}:/run/futuranext/supabase-ca.crt:ro
     depends_on:
-      mongo: {condition: service_healthy}
       redis: {condition: service_healthy}
       evolution: {condition: service_healthy}
     networks:
@@ -149,11 +138,14 @@ services:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4)"]
 
   worker:
-    image: ${WA_IMAGE:-futuranext-whatsapp:local}
+    image: ${WA_IMAGE:?Informe WA_IMAGE com a tag do commit}
     restart: unless-stopped
     command: [python, -m, app.worker]
     environment:
       <<: *backend_env
+      WA_DATABASE_URL: ${WA_WORKER_DATABASE_URL:?Informe WA_WORKER_DATABASE_URL (papel wa_worker)}
+      WA_DATABASE_POOL_SIZE: ${WA_WORKER_POOL_SIZE:-2}
+    volumes: *supabase_ca
     depends_on:
       backend: {condition: service_healthy}
     networks: [data, gateway, egress]
@@ -167,7 +159,6 @@ services:
       test: [CMD, python, -c, "import os; from redis import Redis; assert Redis.from_url(os.environ['REDIS_URL']).exists('worker:heartbeat')"]
 
 volumes:
-  mongo_data:
   redis_data:
   evolution_postgres_data:
   evolution_redis_data:

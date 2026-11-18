@@ -25,7 +25,7 @@ Nosso frontend é próprio e não copia o manager. Mesmo assim, exibe aviso de u
 | Python container | 3.12.16-slim-bookworm | tag Docker Hub verificada; host 3.13.3 |
 | FastAPI | 0.162.5 | metadata PyPI |
 | Uvicorn | 0.54.0 | metadata PyPI |
-| PyMongo | 4.19.0 | metadata PyPI; AsyncMongoClient |
+| PyMongo | 4.19.0 | **removido em 18/11/2026**; substituído por psycopg 3.3.9 e psycopg-pool 3.2.6 (PostgreSQL do portal) |
 | redis-py | 8.1.0 | metadata PyPI |
 | httpx | 0.28.1 | metadata PyPI |
 | pydantic-settings | 2.16.2 | metadata PyPI |
@@ -34,7 +34,7 @@ Nosso frontend é próprio e não copia o manager. Mesmo assim, exibe aviso de u
 | Next.js | 16.4.6 | registry npm |
 | React / React DOM | 19.3.1 | registry npm |
 | TypeScript | 5.9.3 | versão estável existente, escolha conservadora em relação a latest 7.0.2 |
-| MongoDB | 8.0.38 | tag Docker Hub da linha 8.0 |
+| MongoDB | 8.0.38 | **removido do Compose em 18/11/2026** |
 | PostgreSQL | 15.19-alpine3.23 | tag Docker Hub e política oficial; major 15 do gateway |
 | Redis server | 8.6.8-alpine3.23 | tag Docker Hub verificada |
 | Evolution | v2.3.7 | imagem verificada; release estável Git 2.3.7 |

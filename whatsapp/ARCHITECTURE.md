@@ -4,12 +4,14 @@ Atualização de cobrança (14/11/2026): Extensão financeira: adapter Asaas sep
 
 Análise: 12/11/2026. Desenho da Fase 1; não equivale a recursos implementados. Fontes em docs/SOURCES.md e verificação em docs/VALIDATION.md.
 
+Atualização de persistência (18/11/2026): MongoDB substituído pelo PostgreSQL do portal (schema privado `whatsapp`, migração Alembic `0013_whatsapp_service`, papéis `wa_api`/`wa_worker`, RLS forçada). Login, contas, cobrança e consentimento por destinatário próprios foram removidos: o portal é a fonte única. As decisões 2 e 4 abaixo foram revisadas. Ver docs/WHATSAPP_POSTGRES.md na raiz do repositório.
+
 ## Decisões técnicas
 
 1. Monólito modular FastAPI, frontend Next.js e worker usando o mesmo domínio Python. Sem Kubernetes, UltraMsg ou Z-API.
-2. MongoDB guarda os dados da plataforma. SQLAlchemy/Alembic são ferramentas relacionais e não atendem ao MongoDB; substituir por PyMongo Async, modelos Pydantic e migrações explícitas. Não introduzir Motor.
+2. PostgreSQL do portal (Supabase) guarda os dados da plataforma no schema privado `whatsapp`. Acesso assíncrono com psycopg 3 + psycopg-pool e SQL parametrizado; schema versionado pelo Alembic do portal. Licença, empresa e aceite são lidos do schema `futuranext` por funções SECURITY DEFINER.
 3. Evolution 2.3.7 exige PostgreSQL/MySQL. PostgreSQL 15 exclusivo do gateway segue o major do Compose oficial. Backend não consulta esse banco; Prisma e suas migrações pertencem à Evolution.
-4. Separar Redis da aplicação do cache Redis do gateway. Mongo é fonte durável dos trabalhos; Redis Streams transporta IDs e sinais, nunca a única cópia do envio.
+4. Separar Redis da aplicação do cache Redis do gateway. PostgreSQL é a fonte durável dos trabalhos (claim com `FOR UPDATE SKIP LOCKED` e lease); Redis Streams transporta IDs e sinais, nunca a única cópia do envio.
 5. Release estável consultada: tag Git `2.3.7`, imagem `evoapicloud/evolution-api:v2.3.7`. Sem latest ou pré-release. A existência da imagem não comprova compatibilidade atual com WhatsApp.
 6. Fase 2 oferece identificação e probes; sem dashboard, QR ou contadores fictícios. Funcionalidades pertencem à Fase 3.
 
@@ -19,7 +21,7 @@ flowchart LR
   B[Robôs Python] --> P
   P --> F[Next.js]
   P --> A[FastAPI]
-  A --> M[(MongoDB)]
+  A --> M[(PostgreSQL portal: schema whatsapp)]
   A --> R[(Redis aplicação)]
   R --> W[Worker Python]
   W --> M
@@ -44,7 +46,7 @@ Interface prevista `WhatsAppProvider`: create_instance, connect, get_connection,
 
 ## Processamento confiável
 
-API autentica, autoriza instância, valida consentimento/opt-out e limites. Insere mensagem `queued` e intenção de despacho no mesmo documento atômico. Índice único resolve concorrência de idempotência. Se publicação Redis falhar, dispatcher reencontra documento pendente. Não presumir transação entre Mongo e Redis.
+API autentica, autoriza instância, valida consentimento/opt-out e limites. Insere mensagem `queued` e intenção de despacho no mesmo documento atômico. Índice único parcial resolve concorrência de idempotência. Se publicação Redis falhar, dispatcher reencontra a linha pendente. Não presumir transação entre PostgreSQL e Redis.
 
 Worker obtém lease atômico, revalida consentimento/limites e registra tentativa antes do I/O. ACK Redis após persistência. Lease expirado após início do envio vira `unknown`, não reenvio cego. Eventos do gateway são persistidos/deduplicados antes de HTTP 200; falha de persistência retorna 503. Correlacionar tenant, instância e ID do provedor; evento atrasado não regride delivered/read para sent.
 

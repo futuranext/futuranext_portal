@@ -22,7 +22,7 @@ A solicitação atual do usuário define o escopo. Mudanças rotineiras e revers
 | Repositório | `https://github.com/futuranext/futuranext_portal`, branch `main`, commit `13e5d69` |
 | Site | `https://futuranext.com.br`, Cloudflare Pages conectado ao GitHub |
 | API | `https://api.futuranext.com.br`, imagem `futuranext-api:13e5d69`, publicada pelo [passo a passo](docs/ATUALIZAR_API.md) |
-| Banco | Supabase PostgreSQL, revisão `0011_billing_customer` |
+| Banco | Supabase PostgreSQL, revisão `0013_whatsapp_service` |
 | Saúde da API | `/health/ready` respondeu com sucesso |
 | Autenticação | Supabase Auth, MFA TOTP obrigatório e troca de senha inicial implementados |
 | Exclusão de usuários | Implementada no portal e na API |
@@ -291,7 +291,8 @@ O serviço veio de `C:\Projetos\Api_WhatsApp` e agora fica em [`whatsapp/`](what
 - **Aceite (`0012_whatsapp_consent`).** O administrador da empresa (`cliente_admin`) que vai parear o número recebe um e-mail com o link "Li e aceito". O link leva a `/portal/produtos?ferramenta=whatsapp&empresa=<id>#aceite=<token>`, só vale na sessão do mesmo usuário e expira em 24 horas. O banco guarda apenas o hash do token. Sem aceite, a API recusa conectar, mostrar o QR Code, cadastrar webhook e criar chaves.
 - **Sem consentimento por destinatário.** O envio é bloqueado apenas para quem fez opt-out, respondendo SAIR, PARAR, STOP ou CANCELAR.
 - **Serviço interno.** A API do portal chama `FN_WHATSAPP_SERVICE_URL` (`http://whatsapp-api:8000`) com `FN_WHATSAPP_SERVICE_TOKEN`, nas rotas `/service/v1/tenants/{tenant}/whatsapp`. O tenant do serviço é o UUID da empresa no portal. Há uma instância por empresa, criada automaticamente na primeira conexão.
-- **Webhook do bot.** O cliente cadastra a URL HTTPS pública. O segredo `whsec_...` aparece uma única vez e fica criptografado na coleção `callback_destinations`. O worker recarrega os destinos a cada 10 segundos. Assinatura HMAC-SHA256 em `X-Timestamp`/`X-Signature`, com eventos `message.received`, `message.status` e `instance.connection`.
+- **Dados do serviço (`0013_whatsapp_service`).** O serviço usa o mesmo PostgreSQL, no schema privado `whatsapp`, com os papéis `wa_api` (backend) e `wa_worker` (worker). As tabelas têm RLS forçada, os grants são mínimos e o schema não aparece na Data API. Não há mais MongoDB. Licença (`tenant_products`) e aceite (`whatsapp_consents`) são conferidos no banco. A Evolution continua, temporariamente, com PostgreSQL próprio. Detalhes, mapa dos dados e validação em [WHATSAPP_POSTGRES.md](docs/WHATSAPP_POSTGRES.md).
+- **Webhook do bot.** O cliente cadastra a URL HTTPS pública. O segredo `whsec_...` aparece uma única vez e fica criptografado em `whatsapp.callback_destinations`. O worker recarrega os destinos a cada 10 segundos. Assinatura HMAC-SHA256 em `X-Timestamp`/`X-Signature`, com eventos `message.received`, `message.status` e `instance.connection`.
 - **Chaves `wp_...`.** Escopos `messages:send`, `messages:read` e `instances:read`, limitadas à instância da empresa, com validade de 365 dias e no máximo 10 ativas. São usadas em `FN_WHATSAPP_PUBLIC_API_URL` (`https://api.futuranext.com.br/whatsapp`). O Caddy publica só `/whatsapp/api/v1/messages*` e `/whatsapp/api/v1/instances*`.
 - **Limites.** 1 envio a cada 5 segundos por número e 100 por dia por empresa.
 
@@ -381,8 +382,9 @@ Antes de ativar pagamentos reais, configure credenciais e homologue o formato at
 | `0010_user_deletion` | Exclusão pessoal, convites e auditoria |
 | `0011_billing_customer` | CPF/CNPJ, e-mail e telefone de cobrança da empresa e vínculo automático do cliente Asaas |
 | `0012_whatsapp_consent` | Aceite por e-mail do administrador que conecta o WhatsApp |
+| `0013_whatsapp_service` | Schema privado `whatsapp` do serviço (antes MongoDB), papéis `wa_api`/`wa_worker`, RLS e funções de licença/aceite |
 
-Head atual `0012_whatsapp_consent`. A readiness exige revisão exata, runtime `fn_app` e RLS ativo. Ao criar migração, ajuste `Database.ready()` e os testes dependentes da revisão.
+Head atual `0013_whatsapp_service`. A readiness exige revisão exata, runtime `fn_app` e RLS ativo. Ao criar migração, ajuste `Database.ready()` e os testes dependentes da revisão.
 
 Migrações publicadas compõem o histórico. Evoluções posteriores recebem revisão nova, aplicada pela imagem que a contém.
 
@@ -572,7 +574,7 @@ migrate current
 migrate heads
 ~~~
 
-Confira revisão atual e head antes de aplicar. No código inspecionado, head `0012_whatsapp_consent`.
+Confira revisão atual e head antes de aplicar. No código inspecionado, head `0013_whatsapp_service`. A 0013 cria os papéis `wa_api`/`wa_worker` sem login; ative-os com `python -m app.db_admin setup-whatsapp-roles` (variáveis `WA_API_DB_PASSWORD` e `WA_WORKER_DB_PASSWORD`).
 
 ### Backup antes da migração
 
