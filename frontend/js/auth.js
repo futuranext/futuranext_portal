@@ -1,10 +1,28 @@
 import {auth, session} from './client.js';
 import {requireMfa} from './mfa.js';
 import {actionForm, button, element, focusHeading, inputField, link, muted, notice, runAction, screen, statusMessage, UserMessage} from './ui.js';
+import {RETURN_KEY} from './workspace.js';
 
 const view = document.body.dataset.view;
 const currentUrl = new URL(location.href);
-const destination = currentUrl.searchParams.get('destino') === 'admin' ? '/admin' : '/portal';
+const area = currentUrl.searchParams.get('destino') === 'admin' ? '/admin' : '/portal';
+
+// Volta ao endereço guardado antes do login, desde que seja da mesma área e da mesma origem.
+function destination() {
+  let saved = null;
+  try {
+    saved = sessionStorage.getItem(RETURN_KEY);
+    sessionStorage.removeItem(RETURN_KEY);
+  } catch { /* sem armazenamento */ }
+  if (!saved || !saved.startsWith('/') || saved.startsWith('//')) return area;
+  try {
+    const target = new URL(saved, location.origin);
+    const inArea = target.pathname === area || target.pathname.startsWith(`${area}/`);
+    return target.origin === location.origin && inArea ? target.pathname + target.search + target.hash : area;
+  } catch {
+    return area;
+  }
+}
 const fragment = new URLSearchParams(currentUrl.hash.slice(1));
 const otpParameters = fragment.has('token_hash') ? fragment : currentUrl.searchParams;
 let otpHash = otpParameters.get('type') === view ? otpParameters.get('token_hash') : null;
@@ -30,7 +48,7 @@ function loginScreen() {
     ], 'Entrar', async (data) => {
       const {error} = await auth.signInWithPassword({email: data.get('email').trim(), password: data.get('password')});
       if (error) throw new UserMessage(error.status === 429 ? 'Muitas tentativas. Aguarde e tente novamente.' : 'Confira seu e-mail e sua senha e tente novamente.');
-      location.replace(destination);
+      location.replace(destination());
     }, {singleUse: true}),
     element('div', {class: 'account-links'}, link('/recuperar-senha', 'Esqueci minha senha')),
   ));

@@ -4,6 +4,7 @@ import {hasVerifiedSession, requireMfa} from './mfa.js';
 import {button, element, link, notice, runAction, screen, statusMessage, UserMessage} from './ui.js';
 
 export const view = document.body.dataset.view;
+export const RETURN_KEY = 'futuranext-return';
 export const isStaff = (context) => ['super_admin', 'suporte'].includes(context.platform_role);
 
 export function navigation(entries, active = view) {
@@ -45,6 +46,11 @@ export async function boot(area, render) {
 
   try {
     if (!await session()) {
+      // A sessão vale por aba: links de e-mail (ex.: aceite do WhatsApp) abrem em aba nova.
+      // Guarda o endereço completo, inclusive o #fragmento, para voltar a ele depois do login.
+      try {
+        sessionStorage.setItem(RETURN_KEY, location.pathname + location.search + location.hash);
+      } catch { /* sem armazenamento: volta para a página inicial da área */ }
       location.replace(login);
       return;
     }
