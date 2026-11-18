@@ -1,105 +1,195 @@
-"""Worker do MVP: outbox Mongo durável e Redis Streams como sinalização."""
+"""Worker: outbox PostgreSQL durável e Redis Streams apenas como sinalização.
+
+Filas usam `FOR UPDATE SKIP LOCKED` em transações curtas e uma lease por item; a chamada ao
+gateway acontece fora da transação. Vários workers podem rodar ao mesmo tempo.
+"""
 import asyncio
 import json
 import random
 import time
 from datetime import timedelta
+
 from fastapi import HTTPException
-from pymongo import ReturnDocument
+
 from .api import recipient_allowed
-from .callback_migration import migrate_callbacks
-from .callbacks import DestinationRegistry, callback_loop, enqueue_callbacks, load_destinations
-from .core import Runtime, Settings, now, new_id
+from .callbacks import (
+    DestinationRegistry,
+    callback_loop,
+    enqueue_callbacks,
+    load_destinations,
+)
+from .core import Runtime, Settings, fetch_one, new_id, now
 from .events import process_event
-from .migrations import migrate
 from .providers import ProviderError
+
+LEASE_SECONDS = 90
+RETENTION_BATCH = 1000
+
+
+async def recover_messages(rt):
+    async with rt.db.tx() as conn:
+        # Envio iniciado sem confirmação: o resultado é incerto e não pode ser repetido.
+        await conn.execute('''
+            UPDATE whatsapp.messages SET status = 'unknown', error_code = 'WORKER_INTERRUPTED', updated_at = now()
+            WHERE status = 'processing' AND lease_until < now() AND dispatch_started_at IS NOT NULL''')
+        await conn.execute('''
+            UPDATE whatsapp.messages SET status = 'queued', due_at = now()
+            WHERE status = 'processing' AND lease_until < now() AND dispatch_started_at IS NULL''')
+
+
+async def claim_message(rt, owner):
+    async with rt.db.tx() as conn:
+        return await fetch_one(conn, '''
+            UPDATE whatsapp.messages SET status = 'processing', lease_owner = %s,
+                lease_until = now() + make_interval(secs => %s)
+            WHERE id = (
+                SELECT id FROM whatsapp.messages
+                WHERE status IN ('queued', 'retry_wait') AND due_at <= now() AND expires_at > now()
+                ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+            RETURNING *''', (owner, LEASE_SECONDS))
 
 
 async def dispatch_one(rt):
-    timestamp = now()
-    await rt.db.messages.update_many({'status': 'processing', 'lease_until': {'$lt': timestamp},
-        'dispatch_started_at': {'$exists': True}}, {'$set': {'status': 'unknown', 'error_code': 'WORKER_INTERRUPTED'}})
-    await rt.db.messages.update_many({'status': 'processing', 'lease_until': {'$lt': timestamp},
-        'dispatch_started_at': {'$exists': False}}, {'$set': {'status': 'queued', 'due_at': timestamp}})
+    await recover_messages(rt)
     owner = new_id()
-    doc = await rt.db.messages.find_one_and_update(
-        {'status': {'$in': ['queued', 'retry_wait']}, 'due_at': {'$lte': timestamp}, 'expires_at': {'$gt': timestamp}},
-        {'$set': {'status': 'processing', 'lease_owner': owner, 'lease_until': timestamp + timedelta(seconds=90)}},
-        sort=[('created_at', 1)], return_document=ReturnDocument.AFTER)
+    doc = await claim_message(rt, owner)
     if not doc:
         return
-    query = {'_id': doc['_id'], 'tenant_id': doc['tenant_id'], 'lease_owner': owner, 'status': 'processing'}
+    tenant = doc['tenant_id']
+    guard = ('WHERE id = %s AND tenant_id = %s AND lease_owner = %s AND status = %s')
+    scope = (doc['id'], tenant, owner, 'processing')
 
-    async def finish(status, code=None, **extra):
-        await rt.db.messages.update_one(query, {'$set': {'status': status, 'error_code': code, 'updated_at': now(), **extra}})
+    async def finish(status, code=None, *, due_at=None, provider_message_id=None, restart=False):
+        async with rt.db.tx() as conn:
+            await conn.execute(
+                'UPDATE whatsapp.messages SET status = %s, error_code = %s, updated_at = now(), '
+                'due_at = coalesce(%s, due_at), provider_message_id = coalesce(%s, provider_message_id), '
+                'dispatch_started_at = CASE WHEN %s THEN NULL ELSE dispatch_started_at END ' + guard,
+                (status, code, due_at, provider_message_id, restart, *scope))
 
-    if doc['content_expires_at'] <= now():
+    async with rt.db.tx() as conn:
+        state = await fetch_one(conn, '''
+            SELECT whatsapp.tenant_licensed(%s) AS licensed,
+                   (SELECT connection_state FROM whatsapp.instances WHERE id = %s AND tenant_id = %s) AS connection,
+                   (SELECT provider_ref FROM whatsapp.instances WHERE id = %s AND tenant_id = %s) AS provider_ref''',
+            (tenant, doc['instance_id'], tenant, doc['instance_id'], tenant))
+        allowed = await recipient_allowed(conn, tenant, doc['phone_hash'])
+    if doc['content_expires_at'] <= now() or not doc['content']:
         await finish('cancelled', 'CONTENT_EXPIRED')
         return
-    if not await recipient_allowed(rt, doc['tenant_id'], doc['phone_hash']):
+    if not allowed:
         await finish('cancelled', 'OPTED_OUT')
         return
-    instance = await rt.db.instances.find_one({'_id': doc['instance_id'], 'tenant_id': doc['tenant_id']})
-    if not instance or instance['connection_state'] in ('deleting', 'error'):
+    if not state['licensed']:
+        await finish('cancelled', 'LICENSE_INACTIVE')
+        return
+    if state['connection'] in (None, 'deleting', 'error'):
         await finish('cancelled', 'INSTANCE_UNAVAILABLE')
         return
-    if instance['connection_state'] != 'connected':
+    if state['connection'] != 'connected':
         await finish('retry_wait', 'NOT_CONNECTED', due_at=now() + timedelta(seconds=30))
         return
     try:
-        await rt.limit(f'send-instance:{instance["_id"]}', 1, 5)
-        await rt.limit(f'send-day:{doc["tenant_id"]}:{now().date()}', 100, 86400)
+        await rt.limit(f'send-instance:{doc["instance_id"]}', 1, 5)
+        await rt.limit(f'send-day:{tenant}:{now().date()}', 100, 86400)
     except HTTPException as exc:
         await finish('retry_wait', 'OPERATIONAL_LIMIT', due_at=now() + timedelta(seconds=60 if exc.status_code == 429 else 10))
         return
-    if not await recipient_allowed(rt, doc['tenant_id'], doc['phone_hash']):
+    async with rt.db.tx() as conn:
+        # Nova consulta logo antes do envio: um opt-out pode ter chegado durante as verificações.
+        if not await recipient_allowed(conn, tenant, doc['phone_hash']):
+            allowed = False
+        else:
+            started = await conn.execute(
+                'UPDATE whatsapp.messages SET dispatch_started_at = now(), attempts = attempts + 1 ' + guard, scope)
+    if not allowed:
         await finish('cancelled', 'OPTED_OUT')
         return
-    content = rt.unseal(doc['content'])
-    result = await rt.db.messages.update_one(query, {'$set': {'dispatch_started_at': now()}, '$inc': {'attempts': 1}})
-    if not result.matched_count:
+    if not started.rowcount:
         return
+    content = rt.unseal(doc['content'])
     try:
-        sent = await rt.provider.send_text(instance['provider_ref'], content['phone'], content['message'])
+        sent = await rt.provider.send_text(state['provider_ref'], content['phone'], content['message'])
         provider_id = (sent.get('key') or {}).get('id')
         if not provider_id:
             await finish('unknown', 'NO_PROVIDER_ID')
         else:
-            await finish('sent', provider_message_id=str(provider_id))
+            await finish('sent', provider_message_id=str(provider_id)[:200])
     except ProviderError as exc:
-        attempts = doc.get('attempts', 0) + 1
+        attempts = doc['attempts'] + 1
         if exc.uncertain:
             await finish('unknown', exc.code)
         elif exc.retryable and attempts < 3:
-            await rt.db.messages.update_one(query, {'$set': {'status': 'retry_wait', 'error_code': exc.code,
-                'due_at': now() + timedelta(seconds=(5, 30, 120)[attempts-1] + random.uniform(0, 3))},
-                '$unset': {'dispatch_started_at': ''}})
+            await finish('retry_wait', exc.code, restart=True,
+                         due_at=now() + timedelta(seconds=(5, 30, 120)[attempts - 1] + random.uniform(0, 3)))
         else:
             await finish('failed', exc.code)
 
 
-async def maintenance(rt):
-    for instance in await rt.db.instances.find({'connection_state': {'$nin': ['creating', 'error', 'deleting']}}).to_list(100):
+async def process_events(rt, registry, limit=50):
+    """Processa eventos um a um, cada um na própria transação com o evento bloqueado."""
+    for _ in range(limit):
+        async with rt.db.tx() as conn:
+            event = await fetch_one(conn, '''
+                SELECT * FROM whatsapp.gateway_events
+                WHERE NOT processed AND (next_attempt_at IS NULL OR next_attempt_at <= now())
+                ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED''')
+            if not event:
+                return
+            if await process_event(rt, conn, event):
+                if destinations := await registry.current():
+                    await enqueue_callbacks(conn, event, destinations)
+                await conn.execute('UPDATE whatsapp.gateway_events SET processed = true WHERE event_key = %s',
+                                   (event['event_key'],))
+            else:
+                expired = event['created_at'] < now() - timedelta(hours=1)
+                await conn.execute('''
+                    UPDATE whatsapp.gateway_events SET processed = %s, outcome = %s,
+                        next_attempt_at = now() + interval '30 seconds' WHERE event_key = %s''',
+                    (expired, 'unmatched' if expired else 'awaiting_correlation', event['event_key']))
+
+
+async def refresh_instances(rt):
+    async with rt.db.tx() as conn:
+        rows = await (await conn.execute('''
+            SELECT id, tenant_id, provider_ref, connection_state FROM whatsapp.instances
+            WHERE connection_state NOT IN ('creating', 'error', 'deleting') ORDER BY created_at LIMIT 100''')).fetchall()
+    for instance in rows:
         try:
             state = await rt.provider.connection(instance['provider_ref'])
-            changes = {'connection_state': state, 'observed_at': now(), 'last_error': None}
+            changes = {'state': state, 'connected': None, 'disconnected': None}
             if state != instance['connection_state'] and state in ('connected', 'disconnected'):
-                changes['last_connected_at' if state == 'connected' else 'last_disconnected_at'] = now()
-            await rt.db.instances.update_one({'_id': instance['_id'], 'tenant_id': instance['tenant_id'],
-                'connection_state': {'$ne': 'deleting'}}, {'$set': changes})
+                changes['connected' if state == 'connected' else 'disconnected'] = now()
+            async with rt.db.tx() as conn:
+                await conn.execute('''
+                    UPDATE whatsapp.instances SET connection_state = %s, observed_at = now(), last_error = NULL,
+                        last_connected_at = coalesce(%s, last_connected_at),
+                        last_disconnected_at = coalesce(%s, last_disconnected_at)
+                    WHERE id = %s AND tenant_id = %s AND connection_state <> 'deleting' ''',
+                    (state, changes['connected'], changes['disconnected'], instance['id'], instance['tenant_id']))
         except ProviderError as exc:
-            await rt.db.instances.update_one({'_id': instance['_id'], 'tenant_id': instance['tenant_id']}, {'$set': {'last_error': exc.code}})
-    await rt.db.messages.update_many({'content_expires_at': {'$lte': now()}, 'content': {'$exists': True}}, {'$unset': {'content': ''}})
+            async with rt.db.tx() as conn:
+                await conn.execute('UPDATE whatsapp.instances SET last_error = %s WHERE id = %s AND tenant_id = %s',
+                                   (exc.code, instance['id'], instance['tenant_id']))
 
 
-async def billing_loop(rt):
-    from .billing import billing_tick
-    while True:
-        try:
-            await billing_tick(rt)
-        except Exception:
-            print('{"level":"error","event":"billing_iteration_failed"}', flush=True)
-        await asyncio.sleep(60)
+async def apply_retention(rt):
+    """Equivalente aos índices TTL usados antes no MongoDB, em lotes para não segurar locks."""
+    async with rt.db.tx() as conn:
+        await conn.execute('''
+            UPDATE whatsapp.messages SET content = NULL WHERE id IN (
+                SELECT id FROM whatsapp.messages WHERE content IS NOT NULL AND content_expires_at <= now() LIMIT %s)''',
+            (RETENTION_BATCH,))
+        for table in ('messages', 'gateway_events', 'webhook_deliveries', 'audit_events'):
+            key = 'event_key' if table == 'gateway_events' else 'id'
+            await conn.execute(
+                f'DELETE FROM whatsapp.{table} WHERE {key} IN ('
+                f'SELECT {key} FROM whatsapp.{table} WHERE expires_at <= now() LIMIT %s)', (RETENTION_BATCH,))
+
+
+async def maintenance(rt):
+    await refresh_instances(rt)
+    await apply_retention(rt)
 
 
 async def main():
@@ -110,28 +200,15 @@ async def main():
         print('{"level":"error","event":"callback_config_invalid"}', flush=True)
         static_destinations = {}
     rt = Runtime(config)
+    await rt.open()
     registry = DestinationRegistry(rt, static_destinations)
-    background_tasks = []
+    background_tasks = [asyncio.create_task(callback_loop(rt, registry))]
     last_check, cursor = 0.0, '0-0'
     try:
-        await migrate(rt)
-        background_tasks.append(asyncio.create_task(billing_loop(rt)))
-        await migrate_callbacks(rt)
-        background_tasks.append(asyncio.create_task(callback_loop(rt, registry)))
         while True:
             try:
                 await rt.redis.set('worker:heartbeat', now().isoformat(), ex=90)
-                pending = {'processed': False, '$or': [{'next_attempt_at': {'$lte': now()}}, {'next_attempt_at': {'$exists': False}}]}
-                for event in await rt.db.gateway_events.find(pending).sort('created_at', 1).to_list(50):
-                    if await process_event(rt, event):
-                        if destinations := await registry.current():
-                            await enqueue_callbacks(rt, event, destinations)
-                        await rt.db.gateway_events.update_one({'_id': event['_id'], 'tenant_id': event['tenant_id']}, {'$set': {'processed': True}})
-                    else:
-                        expired = event['created_at'] < now() - timedelta(hours=1)
-                        await rt.db.gateway_events.update_one({'_id': event['_id'], 'tenant_id': event['tenant_id']},
-                            {'$set': {'processed': expired, 'outcome': 'unmatched' if expired else 'awaiting_correlation',
-                                      'next_attempt_at': now() + timedelta(seconds=30)}})
+                await process_events(rt, registry)
                 await dispatch_one(rt)
                 if time.monotonic() - last_check > 30:
                     await maintenance(rt)

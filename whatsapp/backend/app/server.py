@@ -3,22 +3,15 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+
+from .api import internal, router
 from .core import Runtime, Settings, new_id
-from .migrations import migrate
-from .auth import router as auth_router
-from .api import router, internal
-from .providers import ProviderError
-from .consent_requests import router as consent_router
-from .consent_migration import migrate_consents
-from .accounts import router as account_router
-from .account_migration import migrate_accounts
-from .billing_migration import migrate_billing
-from .billing import router as billing_router
 from .portal_service import router as portal_router
+from .providers import ProviderError
 
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
@@ -29,10 +22,8 @@ async def lifespan(app: FastAPI):
     rt = Runtime(Settings())
     app.state.rt = rt
     try:
-        await migrate(rt)
-        await migrate_consents(rt)
-        await migrate_accounts(rt)
-        await migrate_billing(rt)
+        # O schema é versionado pelas migrações Alembic do portal (0013_whatsapp_service).
+        await rt.open()
         yield
     finally:
         await rt.close()
@@ -42,8 +33,6 @@ _settings = Settings()
 app = FastAPI(title='Plataforma WhatsApp — API própria', version='0.4.0', lifespan=lifespan,
               docs_url='/docs' if _settings.docs_enabled else None,
               openapi_url='/openapi.json' if _settings.docs_enabled else None, redoc_url=None)
-app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:3000', 'http://127.0.0.1:3000'],
-    allow_methods=['GET', 'POST', 'DELETE', 'OPTIONS'], allow_headers=['Content-Type', 'X-CSRF-Token', 'Authorization', 'X-Tenant-ID'], allow_credentials=True)
 
 
 def error_response(request, status, code, message, headers=None):
@@ -102,8 +91,8 @@ async def dependencies_ready() -> bool:
         response.raise_for_status()
     try:
         async with asyncio.timeout(4):
-            await asyncio.gather(rt.mongo.admin.command('ping'), rt.redis.ping(), gateway_ready())
-        return True
+            database, *_ = await asyncio.gather(rt.db.ready(), rt.redis.ping(), gateway_ready())
+        return bool(database)
     except Exception:
         return False
 
@@ -114,11 +103,6 @@ async def ready():
     return JSONResponse({'status': 'ready' if ok else 'unavailable'}, status_code=200 if ok else 503)
 
 
-app.include_router(auth_router)
 app.include_router(router)
 app.include_router(internal)
-app.include_router(consent_router)
-app.include_router(account_router)
-
-app.include_router(billing_router)
 app.include_router(portal_router)

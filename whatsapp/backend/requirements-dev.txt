@@ -4,8 +4,3 @@ iniconfig==2.3.1
 packaging==26.3
 pluggy==1.7.0
 Pygments==2.21.0
-mongomock-motor==0.0.36
-mongomock==4.3.0
-motor==3.7.1
-pytz==2026.6
-sentinels==1.1.1

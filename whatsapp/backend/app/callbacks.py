@@ -14,10 +14,9 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 from cryptography.fernet import InvalidToken
-from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError, PyMongoError
+from psycopg import Error as DatabaseError
 
-from .core import new_id, now
+from .core import fetch_all, fetch_one, new_id, now
 
 EVENT_TYPES = {
     'messages.upsert': 'message.received',
@@ -54,7 +53,7 @@ def _validate_destination(item):
         raise ValueError
     tenant_id, instance_id, kind, url, secret = (item[key] for key in
         ('tenant_id', 'instance_id', 'kind', 'url', 'secret'))
-    if (tenant_id != 'local-company' and str(UUID(tenant_id)) != tenant_id) or str(UUID(instance_id)) != instance_id:
+    if str(UUID(tenant_id)) != tenant_id or str(UUID(instance_id)) != instance_id:
         raise ValueError
     include_message = item.get('include_message', False)
     if kind not in ('bot', 'futuranext') or type(include_message) is not bool:
@@ -108,14 +107,16 @@ REFRESH_SECONDS = 10
 
 def bot_destination(doc, secret):
     """Valida um destino cadastrado pelo portal com as mesmas regras do cadastro do operador."""
-    return _validate_destination({'tenant_id': doc['tenant_id'], 'instance_id': doc['instance_id'],
+    return _validate_destination({'tenant_id': str(doc['tenant_id']), 'instance_id': str(doc['instance_id']),
         'kind': 'bot', 'url': doc['url'], 'secret': secret,
         'include_message': bool(doc.get('include_message', False))})
 
 
 async def stored_destinations(rt):
     destinations = {}
-    async for doc in rt.db.callback_destinations.find({'enabled': True}):
+    async with rt.db.tx() as conn:
+        rows = await fetch_all(conn, 'SELECT * FROM whatsapp.callback_destinations WHERE enabled')
+    for doc in rows:
         try:
             target = bot_destination(doc, rt.unseal(doc['secret']))
         except (ValueError, KeyError, TypeError, InvalidToken):
@@ -137,40 +138,40 @@ class DestinationRegistry:
             try:
                 self.value = {**await stored_destinations(self.rt), **self.static}
                 self.loaded = time.monotonic()
-            except PyMongoError:
+            except DatabaseError:
                 print('{"level":"error","event":"callback_registry_unavailable"}', flush=True)
         return self.value
 
 
-async def enqueue_callbacks(rt, event, destinations):
+async def enqueue_callbacks(conn, event, destinations):
+    """Cria as entregas na mesma transação que marca o evento como processado."""
     event_type = EVENT_TYPES.get(event['type'])
     if not event_type:
         return
-    tenant, instance = event['tenant_id'], event['instance_id']
+    tenant, instance = str(event['tenant_id']), str(event['instance_id'])
     for key, target in destinations.items():
         if (target.tenant_id, target.instance_id) != (tenant, instance):
             continue
-        event_id = str(uuid5(NAMESPACE_URL, f'whatsapp:{tenant}:{instance}:{event["_id"]}'))
+        event_id = str(uuid5(NAMESPACE_URL, f'whatsapp:{tenant}:{instance}:{event["event_key"]}'))
         delivery_id = str(uuid5(NAMESPACE_URL, f'whatsapp-delivery:{event_id}:{key}'))
-        query = {'_id': delivery_id, 'tenant_id': tenant, 'instance_id': instance}
-        try:
-            await rt.db.webhook_deliveries.update_one(query, {'$setOnInsert': {
-                'destination_key': key, 'kind': target.kind, 'source_id': event['_id'],
-                'event_id': event_id, 'event_type': event_type, 'occurred_at': event['created_at'],
-                'status': 'queued', 'due_at': now(), 'attempts': 0, 'expires_at': event['expires_at'],
-            }}, upsert=True)
-        except DuplicateKeyError:
-            if not await rt.db.webhook_deliveries.find_one(query):
-                raise
+        await conn.execute('''
+            INSERT INTO whatsapp.webhook_deliveries (id, tenant_id, instance_id, source_event, destination_key, kind,
+                event_id, event_type, occurred_at, status, due_at, attempts, expires_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued', now(), 0, %s)
+            ON CONFLICT (id) DO NOTHING''',
+            (delivery_id, tenant, instance, event['event_key'], key, target.kind, event_id, event_type,
+             event['created_at'], event['expires_at']))
 
 
 async def _event_body(rt, delivery, target):
-    scope = {'_id': delivery['source_id'], 'tenant_id': target.tenant_id, 'instance_id': target.instance_id}
-    source = await rt.db.gateway_events.find_one({**scope, 'expires_at': {'$gt': now()}})
+    async with rt.db.tx() as conn:
+        source = await fetch_one(conn, '''
+            SELECT data FROM whatsapp.gateway_events WHERE event_key = %s AND tenant_id = %s AND instance_id = %s
+              AND expires_at > now()''', (delivery['source_event'], target.tenant_id, target.instance_id))
     if not source:
         return None
-    body = {'id': delivery['event_id'], 'type': delivery['event_type'],
-            'instance_id': delivery['instance_id'], 'occurred_at': delivery['occurred_at'].isoformat()}
+    body = {'id': str(delivery['event_id']), 'type': delivery['event_type'],
+            'instance_id': str(delivery['instance_id']), 'occurred_at': delivery['occurred_at'].isoformat()}
     if target.kind == 'bot':
         field_names = {
             'message.received': ('phone', 'message', 'message_id') if target.include_message else (),
@@ -229,43 +230,69 @@ async def _post_callback(http, target, body, event_id):
     return 'failed', 'HTTP_REJECTED', code
 
 
+async def recover_deliveries(rt):
+    async with rt.db.tx() as conn:
+        await conn.execute('''
+            UPDATE whatsapp.webhook_deliveries SET status = 'retry_wait', due_at = now(),
+                error_code = 'WORKER_INTERRUPTED', lease_owner = NULL, lease_until = NULL
+            WHERE status = 'processing' AND lease_until < now() AND kind = 'futuranext' AND attempts <= %s''',
+            (len(RETRY_SECONDS),))
+        await conn.execute('''
+            UPDATE whatsapp.webhook_deliveries SET status = 'unknown', error_code = 'WORKER_INTERRUPTED',
+                lease_owner = NULL, lease_until = NULL
+            WHERE status = 'processing' AND lease_until < now()''')
+
+
+async def claim_delivery(rt, owner):
+    async with rt.db.tx() as conn:
+        return await fetch_one(conn, '''
+            UPDATE whatsapp.webhook_deliveries SET status = 'processing', lease_owner = %s,
+                lease_until = now() + make_interval(secs => %s), attempts = attempts + 1
+            WHERE id = (
+                SELECT id FROM whatsapp.webhook_deliveries
+                WHERE status IN ('queued', 'retry_wait') AND due_at <= now() AND expires_at > now()
+                ORDER BY due_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+            RETURNING *''', (owner, LEASE_SECONDS))
+
+
 async def dispatch_callback(rt, http, destinations):
-    deliveries = rt.db.webhook_deliveries
-    timestamp = now()
-    expired = {'status': 'processing', 'lease_until': {'$lt': timestamp}}
-    await deliveries.update_many({**expired, 'kind': 'futuranext', 'attempts': {'$lte': len(RETRY_SECONDS)}},
-        {'$set': {'status': 'retry_wait', 'due_at': timestamp, 'error_code': 'WORKER_INTERRUPTED'}})
-    await deliveries.update_many(expired, {'$set': {'status': 'unknown', 'error_code': 'WORKER_INTERRUPTED'}})
+    await recover_deliveries(rt)
     owner = new_id()
-    delivery = await deliveries.find_one_and_update(
-        {'status': {'$in': ['queued', 'retry_wait']}, 'due_at': {'$lte': timestamp}, 'expires_at': {'$gt': timestamp}},
-        {'$set': {'status': 'processing', 'lease_owner': owner,
-                  'lease_until': timestamp + timedelta(seconds=LEASE_SECONDS)}, '$inc': {'attempts': 1}},
-        sort=[('due_at', 1)], return_document=ReturnDocument.AFTER)
+    delivery = await claim_delivery(rt, owner)
     if not delivery:
         return False
 
-    scope = {key: delivery[key] for key in ('_id', 'tenant_id', 'instance_id')}
-    query = {**scope, 'lease_owner': owner, 'status': 'processing'}
+    tenant, instance = str(delivery['tenant_id']), str(delivery['instance_id'])
     target = destinations.get(delivery['destination_key'])
-    if not target or (target.tenant_id, target.instance_id) != (delivery['tenant_id'], delivery['instance_id']):
+    async with rt.db.tx() as conn:
+        available = await fetch_one(conn, '''
+            SELECT whatsapp.tenant_licensed(%s) AS licensed, EXISTS (
+                SELECT FROM whatsapp.instances WHERE id = %s AND tenant_id = %s AND connection_state <> 'deleting'
+            ) AS instance''', (tenant, instance, tenant))
+    if not target or (target.tenant_id, target.instance_id) != (tenant, instance):
         status, error, code = 'cancelled', 'DESTINATION_DISABLED', None
-    elif not await rt.db.instances.find_one({'_id': target.instance_id, 'tenant_id': target.tenant_id,
-                                             'connection_state': {'$ne': 'deleting'}}):
+    elif not available['instance']:
         status, error, code = 'cancelled', 'INSTANCE_UNAVAILABLE', None
+    elif not available['licensed']:
+        status, error, code = 'cancelled', 'LICENSE_INACTIVE', None
     elif (body := await _event_body(rt, delivery, target)) is None:
         status, error, code = 'cancelled', 'EVENT_EXPIRED', None
     else:
-        status, error, code = await _post_callback(http, target, body, delivery['event_id'])
+        status, error, code = await _post_callback(http, target, body, str(delivery['event_id']))
 
-    changes = {'status': status, 'error_code': error, 'http_status': code, 'updated_at': now()}
+    due_at = None
     if status == 'retry_wait':
         attempts = delivery['attempts']
         if attempts <= len(RETRY_SECONDS):
-            changes['due_at'] = now() + timedelta(seconds=RETRY_SECONDS[attempts - 1])
+            due_at = now() + timedelta(seconds=RETRY_SECONDS[attempts - 1])
         else:
-            changes['status'] = 'unknown' if error == 'DELIVERY_UNCERTAIN' else 'failed'
-    await deliveries.update_one(query, {'$set': changes, '$unset': {'lease_owner': '', 'lease_until': ''}})
+            status = 'unknown' if error == 'DELIVERY_UNCERTAIN' else 'failed'
+    async with rt.db.tx() as conn:
+        await conn.execute('''
+            UPDATE whatsapp.webhook_deliveries SET status = %s, error_code = %s, http_status = %s,
+                updated_at = now(), due_at = coalesce(%s, due_at), lease_owner = NULL, lease_until = NULL
+            WHERE id = %s AND tenant_id = %s AND lease_owner = %s AND status = 'processing' ''',
+            (status, error, code, due_at, delivery['id'], tenant, owner))
     return True
 
 
@@ -276,6 +303,6 @@ async def callback_loop(rt, registry):
             try:
                 if not await dispatch_callback(rt, http, await registry.current()):
                     await asyncio.sleep(1)
-            except (PyMongoError, InvalidToken, KeyError, ValueError):
+            except (DatabaseError, InvalidToken, KeyError, ValueError):
                 print('{"level":"error","event":"callback_iteration_failed"}', flush=True)
                 await asyncio.sleep(3)

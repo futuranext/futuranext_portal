@@ -1,170 +1,264 @@
+"""API pública (chave wp_), fila de envio, eventos da Evolution e opt-out, com PostgreSQL real."""
 import asyncio
 from datetime import timedelta
 from unittest.mock import AsyncMock
-import httpx
 
+import httpx
 from backend.app.core import now
-from backend.app.worker import dispatch_one
-from backend.app.events import process_event, normalize_event
+from backend.app.events import normalize_event
 from backend.app.providers import EvolutionProvider, ProviderError
+from backend.app.worker import dispatch_one, process_events
+from conftest import INSTANCE_A, INSTANCE_B, WEBHOOK_SECRET, issue_key
 
 PHONE = '5511999999999'
-PAYLOAD = {'instance_id': 'instance-a', 'phone': PHONE, 'message': 'Mensagem de teste', 'idempotency_key': 'test-1'}
+PAYLOAD = {'instance_id': str(INSTANCE_A), 'phone': PHONE, 'message': 'Mensagem de teste', 'idempotency_key': 'test-1'}
+HOOK = f'/internal/webhooks/evolution/{INSTANCE_A}'
 
 
-def consent(admin):
-    rt = admin.app.state.rt
-    asyncio.run(rt.db.consent_requests.insert_one({'tenant_id': 'tenant-a', 'phone_hash': rt.digest('tenant-a:' + PHONE),
-        'status': 'confirmed', 'delivery_channel': 'email_zoho', 'token_hash': 'synthetic-consent', 'confirmed_at': now()}))
+class NoRegistry:
+    async def current(self):
+        return {}
 
 
-def test_login_csrf_and_logout(client, rt):
+def deliver(client, event, data, **extra):
+    return client.post(HOOK, json={'instance': f'wp_{INSTANCE_A}', 'event': event, 'data': data, **extra},
+                       headers={'X-Webhook-Secret': WEBHOOK_SECRET})
+
+
+def test_requires_valid_key_of_licensed_company(client, rt):
     assert client.get('/api/v1/instances').status_code == 401
-    response = client.post('/api/v1/auth/login', json={'email': 'admin@example.test', 'password': 'wrong'})
-    assert response.status_code == 401
-    response = client.post('/api/v1/auth/login', json={'email': 'admin@example.test', 'password': 'Test-password-123!'})
-    assert 'HttpOnly' in response.headers['set-cookie'] and 'SameSite=lax' in response.headers['set-cookie']
-    assert client.post('/api/v1/instances', json={'name': 'Teste'}).status_code == 403
-    client.headers['X-CSRF-Token'] = response.json()['csrf_token']
-    assert client.post('/api/v1/auth/logout').status_code == 204
-    assert client.get('/api/v1/instances').status_code == 401
+    assert client.get('/api/v1/instances', headers={'Authorization': 'Bearer wp_invalida'}).status_code == 401
+    revoked = issue_key(rt, rt.pg.tenant_a, [INSTANCE_A], revoked_at=now())
+    expired = issue_key(rt, rt.pg.tenant_a, [INSTANCE_A], expires_at=now() - timedelta(seconds=1))
+    for secret in (revoked, expired):
+        assert client.get('/api/v1/instances', headers={'Authorization': 'Bearer ' + secret}).status_code == 401
+    # Licença encerrada no portal: a mesma chave deixa de funcionar sem nenhuma ação no serviço.
+    secret = issue_key(rt, rt.pg.tenant_a, [INSTANCE_A])
+    headers = {'Authorization': 'Bearer ' + secret}
+    assert client.get('/api/v1/instances', headers=headers).status_code == 200
+    rt.pg.sql("UPDATE futuranext.tenant_products SET active = false WHERE tenant_id = %s", (rt.pg.tenant_a,), fetch=False)
+    try:
+        assert client.get('/api/v1/instances', headers=headers).status_code == 401
+    finally:
+        rt.pg.sql("UPDATE futuranext.tenant_products SET active = true WHERE tenant_id = %s", (rt.pg.tenant_a,), fetch=False)
 
 
-def test_cross_tenant_instances_and_qr_are_hidden(admin):
-    assert [i['id'] for i in admin.get('/api/v1/instances').json()['items']] == ['instance-a']
-    for suffix in ('connection', 'qr'):
-        assert admin.get('/api/v1/instances/instance-b/' + suffix).status_code == 404
-    assert admin.post('/api/v1/instances/instance-b/connect').status_code == 404
-    assert admin.delete('/api/v1/instances/instance-b').status_code == 404
+def test_scopes_and_tenant_selection(bot):
+    assert bot.get('/api/v1/instances', headers={'X-Tenant-ID': 'qualquer'}).status_code == 403
+    for method, path, body in (('post', '/api/v1/instances', {'name': 'Outra'}),
+                               ('post', f'/api/v1/instances/{INSTANCE_A}/connect', None),
+                               ('get', f'/api/v1/instances/{INSTANCE_A}/qr', None),
+                               ('delete', f'/api/v1/instances/{INSTANCE_A}', None),
+                               ('post', '/api/v1/opt-outs', {'phone': PHONE}),
+                               ('get', '/api/v1/api-keys', None), ('get', '/api/v1/dashboard', None)):
+        response = getattr(bot, method)(path, **({'json': body} if body else {}))
+        assert response.status_code == 403, path
 
 
-def test_idempotency_without_recipient_email_consent(admin, rt):
-    first = admin.post('/api/v1/messages/send', json=PAYLOAD)
+def test_tenant_a_cannot_read_tenant_b(bot, rt):
+    assert [item['id'] for item in bot.get('/api/v1/instances').json()['items']] == [str(INSTANCE_A)]
+    assert bot.get(f'/api/v1/instances/{INSTANCE_B}/connection').status_code == 404
+    assert bot.get('/api/v1/instances/nao-e-uuid/connection').status_code == 404
+    assert bot.post('/api/v1/messages/send', json={**PAYLOAD, 'instance_id': str(INSTANCE_B)}).status_code == 404
+    other = issue_key(rt, rt.pg.tenant_b, [INSTANCE_B])
+    sent = bot.post('/api/v1/messages/send', json={**PAYLOAD, 'instance_id': str(INSTANCE_B)},
+                    headers={'Authorization': 'Bearer ' + other})
+    assert sent.status_code == 202
+    assert bot.get('/api/v1/messages/' + sent.json()['id']).status_code == 404
+    assert bot.get('/api/v1/messages').json()['items'] == []
+    assert bot.get('/api/v1/messages', params={'cursor': sent.json()['id']}).status_code == 422
+
+
+def test_idempotency_and_encrypted_content(bot, rt):
+    first = bot.post('/api/v1/messages/send', json=PAYLOAD)
     assert first.status_code == 202 and first.json()['status'] == 'queued'
-    repeat = admin.post('/api/v1/messages/send', json=PAYLOAD)
-    assert repeat.status_code == 200 and first.json()['id'] == repeat.json()['id']
-    assert admin.post('/api/v1/messages/send', json={**PAYLOAD, 'message': 'Outro texto'}).status_code == 409
-    stored = asyncio.run(rt.db.messages.find_one({'_id': first.json()['id']}))
-    assert 'Mensagem de teste' not in stored['content'] and PHONE not in str(stored)
+    assert first.headers['location'] == '/api/v1/messages/' + first.json()['id']
+    repeat = bot.post('/api/v1/messages/send', json=PAYLOAD)
+    assert repeat.status_code == 200 and repeat.json()['id'] == first.json()['id']
+    conflict = bot.post('/api/v1/messages/send', json={**PAYLOAD, 'message': 'Outro texto'})
+    assert conflict.status_code == 409 and conflict.json()['error']['code'] == 'IDEMPOTENCY_CONFLICT'
+    [stored] = rt.pg.sql('SELECT * FROM whatsapp.messages')
+    assert 'Mensagem de teste' not in str(stored) and PHONE not in str(stored)
+    listed = bot.get('/api/v1/messages', params={'phone': PHONE}).json()['items']
+    assert [item['message'] for item in listed] == ['Mensagem de teste']
 
 
-def test_optout_cancels_queue_and_prevents_future_send(admin, rt):
-    consent(admin)
-    first = admin.post('/api/v1/messages/send', json=PAYLOAD).json()
-    assert admin.post('/api/v1/opt-outs', json={'phone': PHONE}).status_code == 201
-    assert admin.get('/api/v1/messages/' + first['id']).json()['status'] == 'cancelled'
-    assert admin.post('/api/v1/messages/send', json={**PAYLOAD, 'idempotency_key': 'other'}).status_code == 403
-    asyncio.run(dispatch_one(rt))
-    rt.provider.send_text.assert_not_awaited()
+def test_concurrent_requests_with_same_key_create_one_message(bot, rt):
+    async def scenario():
+        transport = httpx.ASGITransport(app=bot.app)
+        async with httpx.AsyncClient(transport=transport, base_url='http://test', headers=bot.headers) as http:
+            return await asyncio.gather(*(http.post('/api/v1/messages/send', json=PAYLOAD) for _ in range(8)))
+    responses = bot.portal.call(scenario)
+    assert {response.status_code for response in responses} <= {200, 202}
+    assert len({response.json()['id'] for response in responses}) == 1
+    assert rt.pg.sql('SELECT count(*) AS total FROM whatsapp.messages')[0]['total'] == 1
 
 
-def test_key_scope_revocation_and_secret_once(admin, rt):
-    response = admin.post('/api/v1/api-keys', json={'name': 'Robô', 'scopes': ['messages:read'], 'instance_ids': ['instance-a']})
-    assert response.status_code == 201
-    key = response.json()
-    assert key['secret'] not in admin.get('/api/v1/api-keys').text
-    cookie = dict(admin.cookies)
-    admin.cookies.clear()
-    admin.headers['Authorization'] = 'Bearer ' + key['secret']
-    assert admin.get('/api/v1/messages').status_code == 200
-    assert admin.post('/api/v1/messages/send', json=PAYLOAD).status_code == 403
-    assert admin.get('/api/v1/instances/instance-a/qr').status_code == 403
-    del admin.headers['Authorization']
-    admin.cookies.update(cookie)
-    assert admin.delete('/api/v1/api-keys/' + key['id']).status_code == 204
-    admin.cookies.clear()
-    admin.headers['Authorization'] = 'Bearer ' + key['secret']
-    assert admin.get('/api/v1/messages').status_code == 401
+def test_not_connected_instance_rejects_send(bot, rt):
+    rt.pg.sql("UPDATE whatsapp.instances SET connection_state = 'disconnected' WHERE id = %s", (INSTANCE_A,), fetch=False)
+    response = bot.post('/api/v1/messages/send', json=PAYLOAD)
+    assert response.status_code == 409 and response.json()['error']['code'] == 'NOT_CONNECTED'
 
 
-def test_key_cannot_target_other_tenant(admin):
-    assert admin.post('/api/v1/api-keys', json={'name': 'Bad', 'scopes': ['messages:read'], 'instance_ids': ['instance-b']}).status_code == 404
-
-
-def test_worker_success_is_sent_not_delivered(admin, rt):
-    consent(admin)
-    result = admin.post('/api/v1/messages/send', json=PAYLOAD).json()
-    asyncio.run(dispatch_one(rt))
-    message = admin.get('/api/v1/messages/' + result['id']).json()
+def test_worker_success_is_sent_not_delivered(bot, rt, work):
+    result = bot.post('/api/v1/messages/send', json=PAYLOAD).json()
+    work(dispatch_one)
+    message = bot.get('/api/v1/messages/' + result['id']).json()
     assert message['status'] == 'sent' and message['provider_message_id'] == 'provider-message-1'
+    rt.provider.send_text.assert_awaited_once_with(f'wp_{INSTANCE_A}', PHONE, 'Mensagem de teste')
+    work(dispatch_one)
+    rt.provider.send_text.assert_awaited_once()
 
 
-def test_timeout_is_unknown_and_not_retried(admin, rt):
-    consent(admin)
-    result = admin.post('/api/v1/messages/send', json=PAYLOAD).json()
+def test_timeout_is_unknown_and_not_retried(bot, rt, work):
+    result = bot.post('/api/v1/messages/send', json=PAYLOAD).json()
     rt.provider.send_text.side_effect = ProviderError('TIMEOUT', uncertain=True)
-    asyncio.run(dispatch_one(rt))
-    asyncio.run(dispatch_one(rt))
-    assert admin.get('/api/v1/messages/' + result['id']).json()['status'] == 'unknown'
+    work(dispatch_one)
+    work(dispatch_one)
+    assert bot.get('/api/v1/messages/' + result['id']).json()['status'] == 'unknown'
     assert rt.provider.send_text.await_count == 1
 
 
-def test_expired_started_lease_is_unknown(admin, rt):
-    consent(admin)
-    result = admin.post('/api/v1/messages/send', json=PAYLOAD).json()
-    asyncio.run(rt.db.messages.update_one({'_id': result['id']}, {'$set': {'status': 'processing', 'lease_until': now()-timedelta(seconds=1), 'dispatch_started_at': now()}}))
-    asyncio.run(dispatch_one(rt))
-    assert admin.get('/api/v1/messages/' + result['id']).json()['status'] == 'unknown'
+def test_safe_connection_failure_schedules_retry(bot, rt, work):
+    result = bot.post('/api/v1/messages/send', json=PAYLOAD).json()
+    rt.provider.send_text.side_effect = ProviderError('CONNECT_FAILED', retryable=True)
+    work(dispatch_one)
+    [doc] = rt.pg.sql('SELECT * FROM whatsapp.messages WHERE id = %s', (result['id'],))
+    assert doc['status'] == 'retry_wait' and doc['dispatch_started_at'] is None
+    assert doc['attempts'] == 1 and doc['due_at'] > now() and doc['lease_owner'] is not None
+
+
+def test_restart_recovers_leases_without_resending(bot, rt, work):
+    started = bot.post('/api/v1/messages/send', json=PAYLOAD).json()
+    claimed = bot.post('/api/v1/messages/send', json={**PAYLOAD, 'idempotency_key': 'test-2'}).json()
+    expired = now() - timedelta(seconds=1)
+    rt.pg.sql("UPDATE whatsapp.messages SET status = 'processing', lease_until = %s, dispatch_started_at = now() "
+              'WHERE id = %s', (expired, started['id']), fetch=False)
+    rt.pg.sql("UPDATE whatsapp.messages SET status = 'processing', lease_until = %s WHERE id = %s",
+              (expired, claimed['id']), fetch=False)
+    work(dispatch_one)
+    assert bot.get('/api/v1/messages/' + started['id']).json()['status'] == 'unknown'
+    assert bot.get('/api/v1/messages/' + claimed['id']).json()['status'] == 'sent'
+    assert rt.provider.send_text.await_count == 1
+
+
+def test_license_ended_cancels_queue(bot, rt, work):
+    result = bot.post('/api/v1/messages/send', json=PAYLOAD).json()
+    rt.pg.sql("UPDATE futuranext.tenant_products SET active = false WHERE tenant_id = %s", (rt.pg.tenant_a,), fetch=False)
+    try:
+        work(dispatch_one)
+    finally:
+        rt.pg.sql("UPDATE futuranext.tenant_products SET active = true WHERE tenant_id = %s", (rt.pg.tenant_a,), fetch=False)
+    [doc] = rt.pg.sql('SELECT status, error_code FROM whatsapp.messages WHERE id = %s', (result['id'],))
+    assert (doc['status'], doc['error_code']) == ('cancelled', 'LICENSE_INACTIVE')
     rt.provider.send_text.assert_not_awaited()
 
 
-def test_webhook_auth_dedup_and_status_precedence(admin, rt):
-    consent(admin)
-    result = admin.post('/api/v1/messages/send', json=PAYLOAD).json()
-    asyncio.run(dispatch_one(rt))
-    envelope = {'instance': 'wp_instance-a', 'event': 'messages.update', 'apikey': 'NEVER_STORE', 'data': {'keyId': 'provider-message-1', 'status': 'READ'}}
-    url = '/internal/webhooks/evolution/instance-a'
-    assert admin.post(url, json=envelope).status_code == 401
-    assert admin.post(url, json={**envelope, 'instance': 'wp_instance-b'}, headers={'X-Webhook-Secret': 'webhook-test'}).status_code == 422
+def test_webhook_auth_dedup_and_status_precedence(bot, rt, work):
+    result = bot.post('/api/v1/messages/send', json=PAYLOAD).json()
+    work(dispatch_one)
+    data = {'keyId': 'provider-message-1', 'status': 'READ'}
+    envelope = {'instance': f'wp_{INSTANCE_A}', 'event': 'messages.update', 'apikey': 'NEVER_STORE', 'data': data}
+    assert bot.post(HOOK, json=envelope).status_code == 401
+    assert bot.post(HOOK, json=envelope, headers={'X-Webhook-Secret': 'errado'}).status_code == 401
+    assert bot.post(f'/internal/webhooks/evolution/{INSTANCE_B}', json=envelope,
+                    headers={'X-Webhook-Secret': WEBHOOK_SECRET}).status_code == 422
+    assert bot.post('/internal/webhooks/evolution/nao-e-uuid', json=envelope,
+                    headers={'X-Webhook-Secret': WEBHOOK_SECRET}).status_code == 401
     for _ in range(2):
-        assert admin.post(url, json=envelope, headers={'X-Webhook-Secret': 'webhook-test'}).status_code == 200
-    assert asyncio.run(rt.db.gateway_events.count_documents({})) == 1
-    event = asyncio.run(rt.db.gateway_events.find_one({}))
-    assert 'NEVER_STORE' not in str(rt.unseal(event['data']))
-    asyncio.run(process_event(rt, event))
-    event['data'] = rt.seal({'message_id': 'provider-message-1', 'status': 'sent'})
-    asyncio.run(process_event(rt, event))
-    assert admin.get('/api/v1/messages/' + result['id']).json()['status'] == 'read'
+        assert deliver(bot, 'messages.update', data, apikey='NEVER_STORE').status_code == 200
+    events = rt.pg.sql('SELECT * FROM whatsapp.gateway_events')
+    assert len(events) == 1 and 'NEVER_STORE' not in str(rt.unseal(events[0]['data']))
+    assert deliver(bot, 'messages.update', {'keyId': 'provider-message-1', 'status': 'SERVER_ACK'}).status_code == 200
+    work(process_events, NoRegistry())
+    assert bot.get('/api/v1/messages/' + result['id']).json()['status'] == 'read'
+    assert rt.pg.sql('SELECT count(*) AS total FROM whatsapp.gateway_events WHERE NOT processed')[0]['total'] == 0
 
 
-def test_received_stop_creates_suppression(admin, rt):
-    event = {'tenant_id': 'tenant-a', 'instance_id': 'instance-a', 'type': 'messages.upsert',
-             'data': rt.seal({'message_id': 'inbound-1', 'phone': PHONE, 'message': 'SAIR'})}
-    asyncio.run(process_event(rt, event))
-    asyncio.run(process_event(rt, event))
-    assert asyncio.run(rt.db.messages.count_documents({'direction': 'inbound'})) == 1
-    assert asyncio.run(rt.db.suppressions.count_documents({})) == 1
+def test_status_before_correlation_waits_for_provider_id(bot, rt, work):
+    assert deliver(bot, 'messages.update', {'keyId': 'ainda-desconhecido', 'status': 'DELIVERY_ACK'}).status_code == 200
+    work(process_events, NoRegistry())
+    [event] = rt.pg.sql('SELECT processed, outcome, next_attempt_at FROM whatsapp.gateway_events')
+    assert not event['processed'] and event['outcome'] == 'awaiting_correlation' and event['next_attempt_at'] > now()
 
 
-def test_qr_stays_ephemeral_and_private(admin, rt):
-    asyncio.run(rt.db.instances.update_one({'_id': 'instance-a'}, {'$set': {'connection_state': 'disconnected'}}))
-    rt.provider.connect.return_value = {'base64': 'data:image/png;base64,dGVzdA=='}
-    assert admin.post('/api/v1/instances/instance-a/connect').status_code == 202
-    response = admin.get('/api/v1/instances/instance-a/qr')
-    assert response.status_code == 200 and response.headers['cache-control'] == 'no-store'
-    doc = asyncio.run(rt.db.instances.find_one({'_id': 'instance-a'}))
-    assert 'dGVzdA==' not in str(doc)
-    rt.redis.expiry['qr:instance-a'] = 0
-    assert admin.get('/api/v1/instances/instance-a/qr').status_code == 409
+def test_received_message_and_stop_keyword_create_suppression(bot, rt, work):
+    queued = bot.post('/api/v1/messages/send', json=PAYLOAD).json()
+    inbound = {'key': {'id': 'inbound-1', 'remoteJid': f'{PHONE}@s.whatsapp.net'}, 'message': {'conversation': 'SAIR'}}
+    for _ in range(2):
+        assert deliver(bot, 'messages.upsert', inbound).status_code == 200
+    work(process_events, NoRegistry())
+    received = bot.get('/api/v1/messages', params={'status': 'received'}).json()['items']
+    assert [(item['phone'], item['message']) for item in received] == [(PHONE, 'SAIR')]
+    assert bot.get('/api/v1/messages/' + queued['id']).json()['status'] == 'cancelled'
+    blocked = bot.post('/api/v1/messages/send', json={**PAYLOAD, 'idempotency_key': 'depois-do-sair'})
+    assert blocked.status_code == 403 and blocked.json()['error']['code'] == 'OPTED_OUT'
+    work(dispatch_one)
+    rt.provider.send_text.assert_not_awaited()
+    assert rt.pg.sql('SELECT count(*) AS total FROM whatsapp.suppressions')[0]['total'] == 1
 
 
-def test_validation_does_not_echo_password_or_body(client):
-    response = client.post('/api/v1/auth/login', json={'email': 'x', 'password': 'PRIVATE_SECRET', 'unexpected': True})
+def test_connection_events_apply_in_order(bot, rt, work):
+    rt.pg.sql("UPDATE whatsapp.instances SET connection_state = 'connecting' WHERE id = %s", (INSTANCE_A,), fetch=False)
+    rt.redis.values[f'qr:{INSTANCE_A}'] = 'qr'
+    assert deliver(bot, 'connection.update', {'state': 'open', 'wuid': f'{PHONE}@s.whatsapp.net'},
+                   date_time='2026-11-18T10:00:00Z').status_code == 200
+    work(process_events, NoRegistry())
+    [instance] = rt.pg.sql('SELECT * FROM whatsapp.instances WHERE id = %s', (INSTANCE_A,))
+    assert instance['connection_state'] == 'connected' and instance['phone_masked'] == '•••• 9999'
+    assert PHONE not in str(instance) and f'qr:{INSTANCE_A}' not in rt.redis.values
+    assert rt.pg.sql("SELECT action FROM whatsapp.audit_events WHERE action = 'instance.connection.connected'")
+
+
+def test_lost_stream_signal_keeps_durable_outbox(bot, rt, work):
+    rt.redis.xadd = AsyncMock(side_effect=RuntimeError('Redis signal lost'))
+    response = bot.post('/api/v1/messages/send', json=PAYLOAD)
+    assert response.status_code == 202
+    work(dispatch_one)
+    assert bot.get('/api/v1/messages/' + response.json()['id']).json()['status'] == 'sent'
+
+
+def test_key_restricted_to_instance_hides_other_instance_messages(bot, rt):
+    rt.pg.sql('''INSERT INTO whatsapp.instances (id, tenant_id, name, provider_ref, connection_state)
+                 VALUES ('cccccccc-0000-4000-8000-00000000000c', %s, 'Outra', 'wp_cccccccc-0000-4000-8000-00000000000c',
+                 'connected')''', (rt.pg.tenant_a,), fetch=False)
+    other = issue_key(rt, rt.pg.tenant_a, ['cccccccc-0000-4000-8000-00000000000c'])
+    sent = bot.post('/api/v1/messages/send', headers={'Authorization': 'Bearer ' + other},
+                    json={**PAYLOAD, 'instance_id': 'cccccccc-0000-4000-8000-00000000000c'})
+    assert sent.status_code == 202
+    assert bot.get('/api/v1/messages/' + sent.json()['id']).status_code == 404
+    assert bot.get('/api/v1/messages').json()['items'] == []
+
+
+def test_validation_and_body_limit(bot):
+    response = bot.post('/api/v1/messages/send', json={**PAYLOAD, 'unexpected': 'PRIVATE_SECRET'})
     assert response.status_code == 422 and 'PRIVATE_SECRET' not in response.text
-    assert client.post('/api/v1/auth/login', content=b'x' * 1048577).status_code == 413
+    assert bot.post('/api/v1/messages/send', content=b'x' * 1048577).status_code == 413
+
+
+def test_redis_failure_blocks_authenticated_requests(bot, rt):
+    rt.redis.eval = AsyncMock(side_effect=RuntimeError('Unavailable'))
+    assert bot.get('/api/v1/instances').status_code == 503
+
+
+def test_normalize_ignores_groups_and_own_messages():
+    rows = [{'key': {'id': '1', 'remoteJid': '123@g.us'}, 'message': {'conversation': 'x'}},
+            {'key': {'id': '2', 'fromMe': True, 'remoteJid': f'{PHONE}@s.whatsapp.net'}}]
+    assert normalize_event('messages.upsert', rows) == []
 
 
 def test_adapter_exact_request_and_ambiguous_response():
     async def run():
         requests = []
+
         def handler(request):
             requests.append(request)
             return httpx.Response(200, json={'key': {'id': 'abc'}})
         async with httpx.AsyncClient(base_url='http://gateway', transport=httpx.MockTransport(handler)) as http:
-            provider = EvolutionProvider(http)
-            await provider.send_text('wp_test', PHONE, 'Texto')
+            await EvolutionProvider(http).send_text('wp_test', PHONE, 'Texto')
             assert requests[0].url.path == '/message/sendText/wp_test'
             assert b'"number"' in requests[0].content and b'"text"' in requests[0].content
+
         def timeout(request):
             raise httpx.ReadTimeout('sensitive-not-propagated')
         async with httpx.AsyncClient(base_url='http://gateway', transport=httpx.MockTransport(timeout)) as http:
@@ -175,43 +269,3 @@ def test_adapter_exact_request_and_ambiguous_response():
             else:
                 raise AssertionError('Timeout não tratado')
     asyncio.run(run())
-
-
-def test_csrf_wrong_origin_and_login_rate_limit(client):
-    body = {'email': 'admin@example.test', 'password': 'incorrect'}
-    assert client.post('/api/v1/auth/login', json=body, headers={'Origin': 'https://attacker.test'}).status_code == 403
-    for _ in range(10):
-        assert client.post('/api/v1/auth/login', json=body).status_code == 401
-    assert client.post('/api/v1/auth/login', json=body).status_code == 429
-
-
-def test_lost_stream_signal_keeps_durable_outbox(admin, rt):
-    consent(admin)
-    rt.redis.xadd = AsyncMock(side_effect=RuntimeError('Redis signal lost'))
-    response = admin.post('/api/v1/messages/send', json=PAYLOAD)
-    assert response.status_code == 202
-    asyncio.run(dispatch_one(rt))
-    assert admin.get('/api/v1/messages/' + response.json()['id']).json()['status'] == 'sent'
-
-
-def test_safe_connection_failure_schedules_retry(admin, rt):
-    consent(admin)
-    result = admin.post('/api/v1/messages/send', json=PAYLOAD).json()
-    rt.provider.send_text.side_effect = ProviderError('CONNECT_FAILED', retryable=True)
-    asyncio.run(dispatch_one(rt))
-    doc = asyncio.run(rt.db.messages.find_one({'_id': result['id']}))
-    assert doc['status'] == 'retry_wait' and 'dispatch_started_at' not in doc
-    assert doc['attempts'] == 1 and doc['due_at'] > now()
-
-
-def test_key_instance_restriction_hides_message(admin, rt):
-    consent(admin)
-    mid = admin.post('/api/v1/messages/send', json=PAYLOAD).json()['id']
-    asyncio.run(rt.db.messages.update_one({'_id': mid}, {'$set': {'tenant_id': 'tenant-b', 'instance_id': 'instance-b'}}))
-    assert admin.get('/api/v1/messages/' + mid).status_code == 404
-    assert admin.get('/api/v1/messages').json()['items'] == []
-
-
-def test_redis_failure_blocks_authenticated_requests(admin, rt):
-    rt.redis.eval = AsyncMock(side_effect=RuntimeError('Unavailable'))
-    assert admin.get('/api/v1/instances').status_code == 503
