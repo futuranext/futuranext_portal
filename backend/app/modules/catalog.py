@@ -33,6 +33,7 @@ class Offer(BaseModel):
     name: str
     description: str
     pending: bool
+    price_cents: int | None = None
 
 
 class RequestStatus(BaseModel):

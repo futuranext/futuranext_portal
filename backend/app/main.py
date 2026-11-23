@@ -25,6 +25,8 @@ from .modules.catalog import router as catalog_router
 from .modules.fiscal import router as fiscal_router
 from .modules.integrations import router as integrations_router
 from .modules.integrations import webhook_router as integrations_webhook_router
+from .modules.signup import router as signup_router
+from .modules.site_chat import router as site_chat_router
 from .modules.whatsapp import WhatsAppService
 from .modules.whatsapp import router as whatsapp_router
 from .routes import router
@@ -37,6 +39,7 @@ PAGES = {
     "login": "login.html",
     "recuperar-senha": "recuperar-senha.html",
     "ativar-conta": "ativar-conta.html",
+    "cadastro": "cadastro.html",
     "portal": "portal.html",
     "portal/produtos": "portal/produtos.html",
     "portal/perfil": "portal/perfil.html",
@@ -97,6 +100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         database = Database(config.database_url.get_secret_value()) if config.database_url else None
         app.state.database = database
         with httpx.Client(timeout=5, follow_redirects=False, trust_env=False) as client:
+            app.state.http = client
             if (
                 config.zoho_mail_client_id and config.zoho_mail_client_secret
                 and config.zoho_mail_refresh_token and config.zoho_mail_account_id
@@ -154,6 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.asaas = None
     app.state.first_access_mailer = None
     app.state.whatsapp = None
+    app.state.http = None
     app.add_middleware(RequestSizeLimit)
     app.add_middleware(
         CORSMiddleware,
@@ -220,6 +225,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(whatsapp_router)
     app.include_router(integrations_router)
     app.include_router(integrations_webhook_router)
+    app.include_router(site_chat_router)
+    app.include_router(signup_router)
     static = config.static_dir.resolve()
     csp = static_content_policy(config)
 

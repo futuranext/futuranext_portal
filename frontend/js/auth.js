@@ -1,4 +1,4 @@
-import {auth, session} from './client.js';
+import {auth, publicApi, session} from './client.js';
 import {requireMfa} from './mfa.js';
 import {actionForm, button, element, focusHeading, inputField, link, muted, notice, runAction, screen, statusMessage, UserMessage} from './ui.js';
 import {RETURN_KEY} from './workspace.js';
@@ -50,7 +50,45 @@ function loginScreen() {
       if (error) throw new UserMessage(error.status === 429 ? 'Muitas tentativas. Aguarde e tente novamente.' : 'Confira seu e-mail e sua senha e tente novamente.');
       location.replace(destination());
     }, {singleUse: true}),
-    element('div', {class: 'account-links'}, link('/recuperar-senha', 'Esqueci minha senha')),
+    element('div', {class: 'account-links'}, link('/recuperar-senha', 'Esqueci minha senha'),
+      link('/cadastro', 'Ainda não tem conta? Teste grátis por 15 dias')),
+  ));
+}
+
+function signupDone(result) {
+  const messages = {
+    sent: `Pronto! Enviamos um e-mail para ${result.email}. Abra o link para criar sua senha e acessar o portal. Seu teste grátis de ${result.trial_days} dias já começou.`,
+    existing_account: `Você já tem uma conta com ${result.email}. Entre na Área do Cliente e aceite o convite da nova empresa para começar o teste grátis.`,
+    pending: 'Cadastro recebido! Não conseguimos enviar o e-mail de acesso agora; a equipe da FuturaNext vai enviar o link em breve.',
+  };
+  const heading = element('h2', {}, 'Cadastro concluído');
+  screen.replaceChildren(element('div', {class: 'stack'}, heading, notice(messages[result.delivery] ?? messages.pending),
+    signInLink()));
+  focusHeading(screen);
+}
+
+function signupScreen() {
+  const terms = element('label', {class: 'check'},
+    element('input', {type: 'checkbox', name: 'accept_terms', required: true}),
+    'Aceito as condições do teste grátis: 15 dias sem custo, um teste por CPF/CNPJ, e as ferramentas param ao final do período se não forem contratadas. Autorizo o contato da FuturaNext sobre a plataforma.');
+  screen.replaceChildren(element('div', {class: 'stack'},
+    muted('Teste a plataforma FuturaNext por 15 dias, sem cartão de crédito. Você recebe por e-mail o link para criar sua senha.'),
+    actionForm([
+      inputField('Seu nome', 'full_name', {autocomplete: 'name', minlength: 2, maxlength: 100, required: true}),
+      email(),
+      inputField('Nome da empresa', 'company', {autocomplete: 'organization', minlength: 2, maxlength: 120, required: true}),
+      inputField('CPF ou CNPJ', 'document', {inputmode: 'numeric', minlength: 11, maxlength: 24, required: true}),
+      inputField('Telefone com DDD', 'phone', {type: 'tel', autocomplete: 'tel', minlength: 10, maxlength: 24, required: true}),
+      terms,
+    ], 'Começar teste grátis', async (data) => {
+      const result = await publicApi('/signup', {
+        full_name: data.get('full_name').trim(), email: data.get('email').trim().toLowerCase(),
+        company: data.get('company').trim(), document: data.get('document').trim(),
+        phone: data.get('phone').trim(), accept_terms: data.has('accept_terms'),
+      });
+      signupDone(result);
+    }, {singleUse: true}),
+    element('div', {class: 'account-links'}, link('/login', 'Já tenho conta')),
   ));
 }
 
@@ -152,6 +190,8 @@ if (!auth) {
   screen.replaceChildren(notice('O acesso à conta está aguardando configuração pela equipe da FuturaNext.'));
 } else if (view === 'login') {
   loginScreen();
+} else if (view === 'signup') {
+  signupScreen();
 } else if ((otpHash && otpHash.length <= 512) || (recoveryCode && recoveryCode.length <= 512)) {
   confirmation();
 } else if (view === 'recovery') {

@@ -21,7 +21,7 @@ def connect(url):
 
 
 def test_migration_is_reversible_and_keeps_portal_tables(pg):
-    assert pg.migration['head'] == {'schema': True, 'messages': True, 'revision': '0013_whatsapp_service'}
+    assert pg.migration['head'] == {'schema': True, 'messages': True, 'revision': '0014_commercial'}
     assert pg.migration['downgraded'] == {'schema': False, 'messages': False, 'revision': '0012_whatsapp_consent'}
     assert pg.migration['portal_intact'] is True
     assert pg.migration['upgraded'] == pg.migration['head']

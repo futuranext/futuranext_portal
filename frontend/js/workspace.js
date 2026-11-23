@@ -14,7 +14,18 @@ export function navigation(entries, active = view) {
   )));
 }
 
-function header(context, area, login) {
+// Nome exibido no topo: o nome informado no perfil ou, na falta dele, o e-mail da conta.
+export function displayName(user) {
+  const name = typeof user?.user_metadata?.full_name === 'string' ? user.user_metadata.full_name.trim() : '';
+  return name || user?.email || '';
+}
+
+export function showUser(name) {
+  const target = document.getElementById('header-user');
+  if (target) target.textContent = name ? `Olá, ${name.split(/\s+/)[0].includes('@') ? name : name.split(/\s+/)[0]}` : '';
+}
+
+function header(context, area, login, user = null) {
   const headerActions = document.getElementById('header-actions');
   const status = statusMessage();
   const logout = button('Sair', true);
@@ -27,7 +38,9 @@ function header(context, area, login) {
   const shortcut = context && (area === 'admin'
     ? link('/portal', 'Portal do cliente')
     : isStaff(context) && link('/admin', 'Administração'));
-  headerActions.replaceChildren(...[shortcut, logout, status].filter(Boolean));
+  const greeting = context && user ? element('span', {class: 'header-user', id: 'header-user', title: user.email ?? ''}) : null;
+  headerActions.replaceChildren(...[greeting, shortcut, logout, status].filter(Boolean));
+  if (greeting) showUser(displayName(user));
 }
 
 export async function boot(area, render) {
@@ -71,7 +84,7 @@ export async function boot(area, render) {
       await requireMfa(screen);
       return;
     }
-    header(context, area, login);
+    header(context, area, login, (await session())?.user);
     await render(context);
   } catch (error) {
     const message = error instanceof UserMessage ? error.message : 'Não foi possível carregar esta tela. Tente novamente.';

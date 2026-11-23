@@ -89,3 +89,33 @@ export async function api(path, {method = 'GET', body, signal, responseType = 'j
 export function resource(id) {
   return encodeURIComponent(id);
 }
+
+// Rotas públicas da API (sem sessão), como o cadastro do teste grátis.
+export async function publicApi(path, body) {
+  let response;
+  try {
+    response = await fetch(`${config.apiBase}/api/v1/public${path}`, {
+      method: 'POST',
+      headers: {Accept: 'application/json', 'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20000),
+      credentials: 'omit',
+      cache: 'no-store',
+      redirect: 'error',
+      referrerPolicy: 'no-referrer',
+    });
+  } catch {
+    throw new UserMessage('Não foi possível conectar ao serviço. Confira sua conexão e tente novamente.');
+  }
+  let data = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    if (response.status !== 422 && typeof data?.detail === 'string') throw new UserMessage(data.detail);
+    throw new ApiError(response.status);
+  }
+  return data;
+}

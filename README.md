@@ -22,7 +22,7 @@ A solicitação atual do usuário define o escopo. Mudanças rotineiras e revers
 | Repositório | `https://github.com/futuranext/futuranext_portal`, branch `main`, commit `13e5d69` |
 | Site | `https://futuranext.com.br`, Cloudflare Pages conectado ao GitHub |
 | API | `https://api.futuranext.com.br`, imagem `futuranext-api:13e5d69`, publicada pelo [passo a passo](docs/ATUALIZAR_API.md) |
-| Banco | Supabase PostgreSQL, revisão `0013_whatsapp_service` |
+| Banco | Supabase PostgreSQL, revisão `0014_commercial` |
 | Saúde da API | `/health/ready` respondeu com sucesso |
 | Autenticação | Supabase Auth, MFA TOTP obrigatório e troca de senha inicial implementados |
 | Exclusão de usuários | Implementada no portal e na API |
@@ -383,8 +383,9 @@ Antes de ativar pagamentos reais, configure credenciais e homologue o formato at
 | `0011_billing_customer` | CPF/CNPJ, e-mail e telefone de cobrança da empresa e vínculo automático do cliente Asaas |
 | `0012_whatsapp_consent` | Aceite por e-mail do administrador que conecta o WhatsApp |
 | `0013_whatsapp_service` | Schema privado `whatsapp` do serviço (antes MongoDB), papéis `wa_api`/`wa_worker`, RLS e funções de licença/aceite |
+| `0014_commercial` | Preço das ferramentas, compra pelo portal, assinatura mensal no Asaas (liga/desliga por empresa), faturas da assinatura via webhook e teste grátis de 15 dias |
 
-Head atual `0013_whatsapp_service`. A readiness exige revisão exata, runtime `fn_app` e RLS ativo. Ao criar migração, ajuste `Database.ready()` e os testes dependentes da revisão.
+Head atual `0014_commercial`. A readiness exige revisão exata, runtime `fn_app` e RLS ativo. Ao criar migração, ajuste `Database.ready()` e os testes dependentes da revisão.
 
 Migrações publicadas compõem o histórico. Evoluções posteriores recebem revisão nova, aplicada pela imagem que a contém.
 
@@ -574,7 +575,7 @@ migrate current
 migrate heads
 ~~~
 
-Confira revisão atual e head antes de aplicar. No código inspecionado, head `0013_whatsapp_service`. A 0013 cria os papéis `wa_api`/`wa_worker` sem login; ative-os com `python -m app.db_admin setup-whatsapp-roles` (variáveis `WA_API_DB_PASSWORD` e `WA_WORKER_DB_PASSWORD`).
+Confira revisão atual e head antes de aplicar. No código inspecionado, head `0014_commercial` (publicação em [LANCAMENTO_COMERCIAL.md](docs/LANCAMENTO_COMERCIAL.md)). A 0013 cria os papéis `wa_api`/`wa_worker` sem login; ative-os com `python -m app.db_admin setup-whatsapp-roles` (variáveis `WA_API_DB_PASSWORD` e `WA_WORKER_DB_PASSWORD`).
 
 ### Backup antes da migração
 

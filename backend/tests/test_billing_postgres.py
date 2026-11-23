@@ -346,7 +346,7 @@ CARD = {
 
 def test_portal_pays_by_boleto_pix_and_card(billing: BillingFlow):
     billing.add_service("Hospedagem", 6000)
-    boleto_invoice = billing.issue("2026-11")
+    boleto_invoice = billing.issue("2098-12")
     base = f"{billing.portal_path}/invoices/{boleto_invoice['id']}/payment"
 
     slip = billing.api.post(base + "/boleto", headers=billing.client)

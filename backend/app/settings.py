@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     whatsapp_service_url: str | None = None
     whatsapp_service_token: SecretStr | None = None
     whatsapp_public_api_url: str | None = None
+    openai_api_key: SecretStr | None = None
+    openai_model: str = Field(default="gpt-4o-mini", pattern=r"^[a-z0-9][a-z0-9.:-]{1,63}$")
+    site_chat_daily_limit: int = Field(default=1500, ge=1, le=100000)
+    leads_email: str = Field(default="suporte@futuranext.com.br", pattern=r"^[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+$")
     auth_mode: Literal["jwks", "remote"] = "jwks"
     frontend_url: str = "http://localhost:8088"
     cors_origins: list[str] = []

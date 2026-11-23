@@ -25,6 +25,7 @@ BILLING_TYPES = {"UNDEFINED", "BOLETO", "PIX", "CREDIT_CARD"}
 WEBHOOK_TOKEN_HEADER = "asaas-access-token"
 CUSTOMER_ID = re.compile(r"cus_[A-Za-z0-9_-]{1,120}")
 PAYMENT_ID = re.compile(r"pay_[A-Za-z0-9_-]{1,120}")
+SUBSCRIPTION_ID = re.compile(r"sub_[A-Za-z0-9_-]{1,120}")
 REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}")
 INVOICE_PATH = re.compile(r"/i/[A-Za-z0-9_-]{1,160}/?")
 BANK_SLIP_PATH = re.compile(r"/b/pdf/[A-Za-z0-9_-]{1,160}/?")
@@ -93,13 +94,36 @@ class AsaasCharge:
     billing_type: BillingType
     amount_cents: int
     due_date: date
-    external_reference: str
+    external_reference: str | None
     status: str
     invoice_url: str | None = field(repr=False)
     deleted: bool = False
     original_amount_cents: int | None = None
     bank_slip_url: str | None = field(default=None, repr=False)
     challenge_url: str | None = field(default=None, repr=False)
+    subscription: str | None = None
+
+
+@dataclass(frozen=True)
+class SubscriptionRequest:
+    """Assinatura mensal da empresa. A forma de pagamento fica em aberto (boleto, Pix ou cartão)."""
+
+    customer: str
+    amount_cents: int
+    next_due_date: date
+    description: str
+    external_reference: str
+
+
+@dataclass(frozen=True)
+class AsaasSubscription:
+    id: str
+    customer: str
+    amount_cents: int
+    next_due_date: date
+    status: str
+    external_reference: str | None
+    deleted: bool = False
 
 
 @dataclass(frozen=True)
@@ -474,6 +498,108 @@ class AsaasClient:
             raise AsaasUncertainCreation("Resposta inválida do pagamento com cartão.") from None
         return self._charge(data)
 
+    def create_subscription(self, request: SubscriptionRequest) -> AsaasSubscription:
+        """Cria a assinatura mensal. Em resultado incerto, concilie com find_subscription."""
+        _check_reference(request.customer, request.external_reference)
+        payload = {
+            "customer": request.customer,
+            "billingType": "UNDEFINED",
+            "value": _request_value(ChargeRequest(
+                request.customer, "UNDEFINED", request.amount_cents, request.next_due_date,
+                request.description, request.external_reference,
+            )),
+            "nextDueDate": request.next_due_date.isoformat(),
+            "cycle": "MONTHLY",
+            "description": request.description.strip()[:500],
+            "externalReference": request.external_reference,
+        }
+        try:
+            subscription = self._subscription(self._request("POST", "/subscriptions", json=payload))
+        except AsaasReconciliationError:
+            raise AsaasUncertainCreation("Não foi possível confirmar a assinatura criada.") from None
+        if (
+            subscription.customer != request.customer
+            or subscription.external_reference != request.external_reference
+            or subscription.amount_cents != request.amount_cents
+        ):
+            raise AsaasUncertainCreation("A assinatura retornada diverge da solicitação.")
+        return subscription
+
+    def find_subscription(self, customer: str, external_reference: str) -> AsaasSubscription | None:
+        _check_reference(customer, external_reference)
+        page = self._request(
+            "GET", "/subscriptions",
+            params={"customer": customer, "externalReference": external_reference, "offset": 0, "limit": 2},
+        )
+        results = page.get("data")
+        if not isinstance(results, list) or type(page.get("hasMore")) is not bool:
+            raise AsaasReconciliationError("Listagem de assinaturas do Asaas inválida.")
+        found = [item for item in (self._subscription(result) for result in results) if not item.deleted]
+        if page["hasMore"] or len(found) > 1:
+            raise AsaasReconciliationError("Há mais de uma assinatura para a mesma empresa.")
+        if found and (found[0].customer != customer or found[0].external_reference != external_reference):
+            raise AsaasReconciliationError("A assinatura retornada não corresponde à empresa.")
+        return found[0] if found else None
+
+    def update_subscription(
+        self, subscription_id: str, *, amount_cents: int | None = None, active: bool | None = None,
+        next_due_date: date | None = None,
+    ) -> AsaasSubscription:
+        """Altera valor ou situação. INACTIVE pausa a assinatura sem apagar as faturas já geradas."""
+        if not SUBSCRIPTION_ID.fullmatch(subscription_id):
+            raise AsaasRejected("Identificador de assinatura Asaas inválido.")
+        payload: dict = {}
+        if amount_cents is not None:
+            if type(amount_cents) is not int or amount_cents <= 0:
+                raise AsaasRejected("Informe um valor positivo em centavos de real.")
+            payload["value"] = amount_cents / 100
+            # Atualiza também as cobranças já geradas e ainda não pagas.
+            payload["updatePendingPayments"] = True
+        if active is not None:
+            payload["status"] = "ACTIVE" if active else "INACTIVE"
+        if next_due_date is not None:
+            payload["nextDueDate"] = next_due_date.isoformat()
+        subscription = self._subscription(
+            self._request("PUT", f"/subscriptions/{subscription_id}", json=payload)
+        )
+        if subscription.id != subscription_id:
+            raise AsaasReconciliationError("O identificador retornado diverge da assinatura.")
+        return subscription
+
+    def get_subscription(self, subscription_id: str) -> AsaasSubscription:
+        if not SUBSCRIPTION_ID.fullmatch(subscription_id):
+            raise AsaasRejected("Identificador de assinatura Asaas inválido.")
+        subscription = self._subscription(self._request("GET", f"/subscriptions/{subscription_id}"))
+        if subscription.id != subscription_id:
+            raise AsaasReconciliationError("O identificador retornado diverge da assinatura.")
+        return subscription
+
+    def _subscription(self, data: object) -> AsaasSubscription:
+        try:
+            if not isinstance(data, dict):
+                raise TypeError
+            subscription_id, customer = data["id"], data["customer"]
+            status, due_date = data["status"], data["nextDueDate"]
+            reference = data.get("externalReference")
+            deleted = data.get("deleted", False)
+            if (
+                not isinstance(subscription_id, str) or not SUBSCRIPTION_ID.fullmatch(subscription_id)
+                or not isinstance(customer, str) or not CUSTOMER_ID.fullmatch(customer)
+                or not isinstance(status, str) or not PAYMENT_STATUS.fullmatch(status)
+                or not isinstance(due_date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due_date)
+                or (reference is not None and not isinstance(reference, str))
+                or type(deleted) is not bool
+            ):
+                raise ValueError
+            return AsaasSubscription(
+                subscription_id, customer, _amount_cents(data["value"]), date.fromisoformat(due_date),
+                status, reference, deleted,
+            )
+        except (TypeError, KeyError, ValueError, OverflowError, DecimalException):
+            raise AsaasReconciliationError(
+                "Os dados da assinatura retornada pelo Asaas são inválidos."
+            ) from None
+
     def get_customer(self, customer_id: str) -> AsaasCustomer:
         if not CUSTOMER_ID.fullmatch(customer_id):
             raise AsaasRejected("Identificador de cliente Asaas inválido.")
@@ -561,7 +687,8 @@ class AsaasClient:
                 raise TypeError
             payment_id, customer = data["id"], data["customer"]
             method, status = data["billingType"], data["status"]
-            reference, due_date = data["externalReference"], data["dueDate"]
+            reference, due_date = data.get("externalReference"), data["dueDate"]
+            subscription = data.get("subscription")
             amount = _amount_cents(data["value"])
             original = data.get("originalValue")
             deleted = data.get("deleted", False)
@@ -571,7 +698,14 @@ class AsaasClient:
                 or not CUSTOMER_ID.fullmatch(customer)
                 or method not in BILLING_TYPES
                 or not PAYMENT_STATUS.fullmatch(status)
-                or not REFERENCE.fullmatch(reference)
+                or (subscription is not None and not (
+                    isinstance(subscription, str) and SUBSCRIPTION_ID.fullmatch(subscription)
+                ))
+                # Cobranças avulsas sempre têm referência; as da assinatura podem vir sem ela.
+                or (reference is None and subscription is None)
+                or (reference is not None and not (
+                    isinstance(reference, str) and REFERENCE.fullmatch(reference)
+                ))
                 or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", due_date)
                 or type(deleted) is not bool
                 or (not deleted and invoice is None)
@@ -590,6 +724,7 @@ class AsaasClient:
                 _amount_cents(original) if original is not None else None,
                 bank_slip_url(data.get("bankSlipUrl"), self.config.environment),
                 _challenge_url(data.get("threeDSecureChallengeUrl")),
+                subscription,
             )
         except (TypeError, KeyError, ValueError, OverflowError, DecimalException):
             raise AsaasReconciliationError(

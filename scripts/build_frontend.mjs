@@ -79,7 +79,12 @@ try {
 
 await mkdir(bundleDir, {recursive: true});
 await Promise.all([
-  ...['index.html', 'styles.css', 'script.js', 'config.js'].map((file) => cp(join(root, file), join(output, file))),
+  ...['index.html', 'styles.css', 'script.js'].map((file) => cp(join(root, file), join(output, file))),
+  // O chat do site chama a API pública; o endereço vem do mesmo PUBLIC_API_BASE_URL do portal.
+  readFile(join(root, 'config.js'), 'utf8').then((text) => writeFile(join(output, 'config.js'),
+    `${text}
+window.FUTURANEXT_CONFIG.apiBase = ${JSON.stringify(apiBase)};
+`)),
   ...bundle.outputFiles.map((file) => writeFile(file.path, file.contents)),
   mkdir(join(output, 'assets')).then(() => Promise.all([
     cp(join(root, 'assets', 'logo-mark.svg'), join(output, 'assets', 'logo-mark.svg')),
@@ -93,6 +98,7 @@ const authRoutes = [
   ['login', 'Entrar na FuturaNext', 'login'],
   ['recuperar-senha', 'Recuperar senha', 'recovery'],
   ['ativar-conta', 'Ativar conta', 'invite'],
+  ['cadastro', 'Teste grátis por 15 dias', 'signup'],
 ];
 const portalRoutes = [
   ['portal', 'Visão geral', 'overview'],

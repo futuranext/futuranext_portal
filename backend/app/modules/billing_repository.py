@@ -144,3 +144,75 @@ class BillingRepository(Repository):
             VALUES (:environment, :event, :invoice)
             ON CONFLICT (environment, event_id) DO NOTHING RETURNING event_id
         """, environment=environment, event=event_id, invoice=invoice_id) is not None
+
+    # --- Assinatura mensal ------------------------------------------------------------------
+
+    def enable_subscription_sync(self) -> None:
+        """Permite ao administrador da empresa gravar a assinatura durante a compra de ferramentas."""
+        self._scalar("SELECT set_config('fn.billing_subscription_sync', 'true', true)")
+
+    def subscription(self, tenant_id: UUID) -> Record | None:
+        return self._one("""
+            SELECT tenant_id, environment, enabled, provider_id, provider_state, value_cents, next_due_date,
+                updated_at
+            FROM futuranext.billing_subscriptions WHERE tenant_id = :tenant
+        """, tenant=tenant_id)
+
+    def save_subscription(self, tenant_id: UUID, environment: str, **values) -> Record:
+        """Cria ou atualiza a assinatura; só altera os campos informados."""
+        current = self.subscription(tenant_id)
+        merged = {
+            "enabled": True, "provider_id": None, "provider_state": "unsubmitted",
+            "value_cents": None, "next_due_date": None,
+            **({key: current[key] for key in (
+                "enabled", "provider_id", "provider_state", "value_cents", "next_due_date",
+            )} if current else {}),
+            **values,
+        }
+        return self._rows("""
+            INSERT INTO futuranext.billing_subscriptions
+                (tenant_id, environment, enabled, provider_id, provider_state, value_cents, next_due_date)
+            VALUES (:tenant, :environment, :enabled, :provider_id, :provider_state, :value_cents, :next_due_date)
+            ON CONFLICT (tenant_id) DO UPDATE SET environment = excluded.environment,
+                enabled = excluded.enabled, provider_id = excluded.provider_id,
+                provider_state = excluded.provider_state, value_cents = excluded.value_cents,
+                next_due_date = excluded.next_due_date, updated_at = now()
+            RETURNING tenant_id, environment, enabled, provider_id, provider_state, value_cents,
+                next_due_date, updated_at
+        """, tenant=tenant_id, environment=environment, **merged)[0]
+
+    def try_lock_subscription(self, tenant_id: UUID) -> bool:
+        return bool(self._scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(:key, 0))",
+            key=f"futuranext:billing-subscription:{tenant_id}",
+        ))
+
+    def active_total(self, tenant_id: UUID) -> int:
+        """Soma dos serviços ativos; 0 quando não há serviço ou passa de 100 itens."""
+        total = self._scalar("""
+            SELECT CASE WHEN count(*) BETWEEN 1 AND 100 THEN sum(amount_cents) ELSE 0 END
+            FROM futuranext.billing_services WHERE tenant_id = :tenant AND active
+        """, tenant=tenant_id)
+        return int(total or 0)
+
+    def record_subscription_payment(
+        self, environment: str, subscription_id: str, payment_id: str, due: date, amount_cents: int,
+        status: str, url: str | None,
+    ) -> UUID | None:
+        return self._scalar("""
+            SELECT futuranext.record_subscription_payment(
+                :environment, :subscription, :payment, :due, :amount, :status, :url)
+        """, environment=environment, subscription=subscription_id, payment=payment_id, due=due,
+            amount=amount_cents, status=status, url=url)
+
+    # --- Compra e teste grátis --------------------------------------------------------------
+
+    def purchase_tool(self, tenant_id: UUID, product_id: UUID) -> bool:
+        return bool(self._scalar(
+            "SELECT futuranext.purchase_tool(:tenant, :product)", tenant=tenant_id, product=product_id,
+        ))
+
+    def trial(self, tenant_id: UUID) -> Record | None:
+        return self._one(
+            "SELECT started_at, ends_at FROM futuranext.trials WHERE tenant_id = :tenant", tenant=tenant_id,
+        )

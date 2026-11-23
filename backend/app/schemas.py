@@ -8,6 +8,7 @@ from pydantic import (
     AwareDatetime,
     BaseModel,
     ConfigDict,
+    Field,
     SecretStr,
     StringConstraints,
     field_validator,
@@ -140,8 +141,13 @@ class MembershipContext(BaseModel):
     role: ClientRole
 
 
+Price = Annotated[int, Field(strict=True, ge=1, le=10_000_000)]
+
+
 class ProductFields(Input):
     name: Name
+    # Mensalidade em centavos. Sem preço, a ferramenta não pode ser comprada pelo portal.
+    price_cents: Price | None = None
     launch_url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2048)] | None = None
 
     @field_validator("launch_url")
@@ -185,6 +191,7 @@ class PortalProduct(BaseModel):
 class AdminProduct(PortalProduct):
     active: bool
     offerable: bool = False
+    price_cents: int | None = None
 
 
 class LicenseUpdate(Input):

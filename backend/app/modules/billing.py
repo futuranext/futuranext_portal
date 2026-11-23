@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -30,6 +30,7 @@ from .asaas import (
     ChargeRequest,
     CreditCard,
     CustomerRequest,
+    SubscriptionRequest,
 )
 from .billing_repository import BillingRepository
 
@@ -41,6 +42,8 @@ InvoiceStatus = Literal[
 CUSTOMER_PATTERN = r"^cus_[a-zA-Z0-9_-]{1,120}$"
 REFERENCE_PREFIX = "futuranext:invoice:"
 CUSTOMER_REFERENCE_PREFIX = "futuranext:tenant:"
+SUBSCRIPTION_REFERENCE_PREFIX = "futuranext:subscription:"
+SUBSCRIPTION_DESCRIPTION = "Mensalidade FuturaNext"
 CUSTOMER_MESSAGES: dict[str, str] = {
     "linked": "Cliente Asaas vinculado.",
     "incomplete": "Complete CPF/CNPJ, e-mail e telefone no cadastro da empresa.",
@@ -169,10 +172,33 @@ class CardResult(BaseModel):
     challenge_url: str | None = None
 
 
+class SubscriptionView(BaseModel):
+    enabled: bool
+    status: Literal["active", "paused", "pending", "error"]
+    value_cents: int | None
+    next_due_date: date | None
+
+
+class SubscriptionInput(Input):
+    enabled: bool
+    next_due_date: date | None = None
+
+
+class PlanView(BaseModel):
+    trial_ends_at: AwareDatetime | None
+    trial_active: bool
+    subscription: SubscriptionView | None
+
+
+class PurchaseResult(BaseModel):
+    subscription: SubscriptionView | None
+
+
 class PortalBilling(BaseModel):
     payment_available: bool
     customer_ready: bool = False
     invoices: list[Invoice]
+    subscription: SubscriptionView | None = None
 
 
 class AdminBilling(PortalBilling):
@@ -187,6 +213,7 @@ class AdminBilling(PortalBilling):
 class EventPayment(BaseModel):
     id: Annotated[str, StringConstraints(pattern=r"^pay_[a-zA-Z0-9_-]{1,120}$")]
     externalReference: Annotated[str, StringConstraints(max_length=200)] | None = None
+    subscription: Annotated[str, StringConstraints(pattern=r"^sub_[a-zA-Z0-9_-]{1,120}$")] | None = None
 
 
 class PaymentEvent(BaseModel):
@@ -330,6 +357,18 @@ def reference(invoice_id: UUID) -> str:
 
 def apply_charge(repo: BillingRepository, invoice: Record, charge: AsaasCharge) -> Record:
     expected_id = invoice["provider_id"]
+    if invoice.get("subscription_id"):
+        # Fatura da assinatura: a identidade é a cobrança, o cliente e a assinatura de origem.
+        if (
+            charge.id != expected_id or charge.customer != invoice["customer_id"]
+            or charge.subscription != invoice["subscription_id"]
+        ):
+            return repo.update_payment(invoice, state="linked", status="review", provider_id=expected_id)
+        status = "cancelled" if charge.deleted else STATUS.get(charge.status, "review")
+        return repo.update_payment(
+            invoice, state="linked", status=status, provider_id=charge.id,
+            url=charge.invoice_url if status in {"open", "overdue", "processing"} else None,
+        )
     amount = charge.amount_cents
     if charge.original_amount_cents is not None and charge.status in {
         "CONFIRMED", "RECEIVED", "RECEIVED_IN_CASH", "REFUNDED",
@@ -366,6 +405,89 @@ def sync_charge(repo: BillingRepository, invoice: Record, provider: AsaasClient)
     return apply_charge(repo, invoice, charge) if charge else invoice
 
 
+def subscription_reference(tenant_id: UUID) -> str:
+    return SUBSCRIPTION_REFERENCE_PREFIX + str(tenant_id)
+
+
+def subscription_view(row: Record | None) -> SubscriptionView | None:
+    if row is None:
+        return None
+    if not row["enabled"]:
+        status = "paused"
+    elif row["provider_state"] == "linked":
+        status = "active"
+    elif row["provider_state"] in {"rejected", "uncertain"}:
+        status = "error"
+    else:
+        status = "pending"
+    return SubscriptionView(
+        enabled=row["enabled"], status=status, value_cents=row["value_cents"],
+        next_due_date=row["next_due_date"],
+    )
+
+
+def push_subscription(
+    billing: BillingRepository, tenant_id: UUID, provider: AsaasClient | None, mode: str,
+    *, reactivate: bool = False,
+) -> Record | None:
+    """Leva ao Asaas a situação gravada: liga/desliga e valor = soma dos serviços ativos.
+
+    Sem serviço ativo a assinatura fica pausada. A criação é conciliada pela referência da empresa,
+    então repetir a chamada não duplica a assinatura.
+    """
+    row = billing.subscription(tenant_id)
+    if row is None or provider is None or row["environment"] != mode:
+        return row
+    account = billing.account(tenant_id)
+    if not account or account["environment"] != mode or not billing.try_lock_subscription(tenant_id):
+        return row
+    total = billing.active_total(tenant_id)
+    try:
+        if not row["provider_id"]:
+            if not row["enabled"] or not total:
+                return billing.save_subscription(tenant_id, mode, value_cents=total or None)
+            request = SubscriptionRequest(
+                customer=account["customer_id"], amount_cents=total,
+                next_due_date=max(row["next_due_date"] or today(), today()),
+                description=SUBSCRIPTION_DESCRIPTION, external_reference=subscription_reference(tenant_id),
+            )
+            try:
+                subscription = provider.find_subscription(request.customer, request.external_reference)
+                if subscription is None:
+                    subscription = provider.create_subscription(request)
+            except AsaasUncertainCreation:
+                return billing.save_subscription(
+                    tenant_id, mode, provider_state="uncertain", value_cents=total,
+                )
+            if subscription.amount_cents != total:
+                subscription = provider.update_subscription(subscription.id, amount_cents=total)
+            return billing.save_subscription(
+                tenant_id, mode, provider_id=subscription.id, provider_state="linked",
+                value_cents=total, next_due_date=subscription.next_due_date,
+            )
+        active = bool(row["enabled"] and total)
+        changes: dict = {}
+        if active and total != row["value_cents"]:
+            changes["amount_cents"] = total
+        if reactivate or not active:
+            changes["active"] = active
+        if reactivate and active and row["next_due_date"]:
+            changes["next_due_date"] = max(row["next_due_date"], today())
+        if not changes:
+            return row
+        subscription = provider.update_subscription(row["provider_id"], **changes)
+        return billing.save_subscription(
+            tenant_id, mode, provider_state="linked", value_cents=total or row["value_cents"],
+            next_due_date=subscription.next_due_date,
+        )
+    except AsaasRejected:
+        return billing.save_subscription(tenant_id, mode, provider_state="rejected")
+    except AsaasError:
+        if row["provider_id"]:
+            return row
+        return billing.save_subscription(tenant_id, mode, provider_state="uncertain")
+
+
 @router.get("/admin/clients/{tenant_id}/billing", response_model=AdminBilling)
 def admin_billing(tenant_id: UUID, identity: CurrentUser, database: Data, request: Request, provider: Asaas):
     mode = environment(request)
@@ -382,7 +504,41 @@ def admin_billing(tenant_id: UUID, identity: CurrentUser, database: Data, reques
             webhook_configured=bool(provider and provider.config.webhook_token),
             services=[Service(**row) for row in billing.services(tenant_id)],
             invoices=[invoice_view(row, mode, admin=True) for row in billing.invoices(tenant_id)],
+            subscription=subscription_view(billing.subscription(tenant_id)),
         )
+
+
+@router.put("/admin/clients/{tenant_id}/billing/subscription", response_model=AdminBilling)
+def save_subscription(
+    tenant_id: UUID, payload: SubscriptionInput, identity: CurrentUser, database: Data,
+    request: Request, provider: Asaas,
+):
+    """Liga ou desliga a cobrança mensal automática da empresa."""
+    mode = environment(request)
+    if payload.enabled and payload.next_due_date and payload.next_due_date < today():
+        raise HTTPException(422, "Escolha um vencimento a partir de hoje.")
+    with tenant_repository(database, identity, tenant_id) as repo:
+        billing = BillingRepository(repo.connection)
+        billing_admin(billing, tenant_id)
+        current = billing.subscription(tenant_id)
+        values: dict = {"enabled": payload.enabled}
+        if current and current["environment"] != mode:
+            values.update(provider_id=None, provider_state="unsubmitted")
+        if payload.enabled:
+            status = sync_customer(billing, tenant_id, provider, mode)
+            if status != "linked":
+                raise HTTPException(409, CUSTOMER_MESSAGES[status])
+            if not billing.active_total(tenant_id):
+                raise HTTPException(409, "Cadastre pelo menos um serviço ativo antes de ligar a cobrança.")
+            due = payload.next_due_date or (current["next_due_date"] if current else None)
+            if due is None:
+                raise HTTPException(422, "Informe o primeiro vencimento da cobrança mensal.")
+            values["next_due_date"] = due
+        elif current is None:
+            values["next_due_date"] = None
+        billing.save_subscription(tenant_id, mode, **values)
+        push_subscription(billing, tenant_id, provider, mode, reactivate=payload.enabled)
+    return admin_billing(tenant_id, identity, database, request, provider)
 
 
 @router.put("/admin/clients/{tenant_id}/billing/account", response_model=Account)
@@ -416,21 +572,29 @@ def sync_account(
 
 
 @router.post("/admin/clients/{tenant_id}/billing/services", response_model=Service, status_code=201)
-def create_service(tenant_id: UUID, payload: ServiceInput, identity: CurrentUser, database: Data):
+def create_service(
+    tenant_id: UUID, payload: ServiceInput, identity: CurrentUser, database: Data, request: Request,
+):
     with tenant_repository(database, identity, tenant_id) as repo:
         billing = BillingRepository(repo.connection)
         billing_admin(billing, tenant_id)
-        return billing.create_service(tenant_id, **payload.model_dump())
+        service = billing.create_service(tenant_id, **payload.model_dump())
+        # Com a cobrança mensal ligada, o novo valor vale a partir da próxima fatura.
+        push_subscription(billing, tenant_id, request.app.state.asaas, environment(request))
+        return service
 
 
 @router.patch("/admin/clients/{tenant_id}/billing/services/{service_id}", response_model=Service)
 def update_service(
     tenant_id: UUID, service_id: UUID, payload: ServiceInput, identity: CurrentUser, database: Data,
+    request: Request,
 ):
     with tenant_repository(database, identity, tenant_id) as repo:
         billing = BillingRepository(repo.connection)
         billing_admin(billing, tenant_id)
-        return found(billing.update_service(tenant_id, service_id, **payload.model_dump()))
+        service = found(billing.update_service(tenant_id, service_id, **payload.model_dump()))
+        push_subscription(billing, tenant_id, request.app.state.asaas, environment(request))
+        return service
 
 
 @router.post("/admin/clients/{tenant_id}/billing/invoices", response_model=Invoice, status_code=201)
@@ -494,7 +658,58 @@ def portal_billing(tenant_id: UUID, identity: CurrentUser, database: Data, reque
             payment_available=provider is not None,
             customer_ready=status == "linked",
             invoices=[invoice_view(row, mode) for row in billing.invoices(tenant_id)],
+            subscription=subscription_view(billing.subscription(tenant_id)),
         )
+
+
+@router.get("/tenants/{tenant_id}/plan", response_model=PlanView)
+def portal_plan(tenant_id: UUID, identity: CurrentUser, database: Data):
+    """Teste grátis e assinatura da empresa, sem chamar o Asaas."""
+    with tenant_repository(database, identity, tenant_id) as repo:
+        require_permission(repo, "tenant.access", status=404)
+        billing = BillingRepository(repo.connection)
+        trial = billing.trial(tenant_id)
+        now = datetime.now(ZoneInfo("America/Sao_Paulo"))
+        return PlanView(
+            trial_ends_at=trial["ends_at"] if trial else None,
+            trial_active=bool(trial and trial["ends_at"] > now),
+            subscription=subscription_view(billing.subscription(tenant_id)),
+        )
+
+
+def first_due_date(trial: Record | None) -> date:
+    """Primeira mensalidade: no fim do teste grátis ou, sem teste em andamento, em três dias."""
+    if trial:
+        ends = trial["ends_at"].astimezone(ZoneInfo("America/Sao_Paulo")).date()
+        if ends > today():
+            return ends
+    return today() + timedelta(days=3)
+
+
+@router.post("/tenants/{tenant_id}/offers/{product_id}/purchase", response_model=PurchaseResult)
+def purchase_tool(
+    tenant_id: UUID, product_id: UUID, identity: CurrentUser, database: Data,
+    request: Request, provider: Asaas,
+):
+    """Compra imediata: libera a ferramenta e soma a mensalidade dela à assinatura da empresa."""
+    mode = environment(request)
+    with tenant_repository(database, identity, tenant_id) as repo:
+        require_permission(repo, "tenant.access", status=404)
+        billing = BillingRepository(repo.connection)
+        if not billing.purchase_tool(tenant_id, product_id):
+            raise HTTPException(
+                403, "Somente o administrador da empresa pode contratar, e a ferramenta precisa ter preço.",
+            )
+        sync_customer(billing, tenant_id, provider, mode, as_member=True)
+        billing.enable_subscription_sync()
+        current = billing.subscription(tenant_id)
+        if current is None or current["environment"] != mode:
+            billing.save_subscription(
+                tenant_id, mode, enabled=True, provider_id=None, provider_state="unsubmitted",
+                next_due_date=first_due_date(billing.trial(tenant_id)),
+            )
+        row = push_subscription(billing, tenant_id, provider, mode)
+        return PurchaseResult(subscription=subscription_view(row))
 
 
 def ensure_charge(
@@ -710,6 +925,8 @@ def asaas_webhook(
         raise HTTPException(401, "Webhook não autorizado.")
     if event.payment is None or not event.event.startswith("PAYMENT_"):
         return {"received": True}
+    if event.payment.subscription:
+        return subscription_payment_event(event.payment, database, environment(request), provider)
     external = event.payment.externalReference or ""
     if not external.startswith(REFERENCE_PREFIX):
         return {"received": True}
@@ -742,4 +959,34 @@ def asaas_webhook(
                     raise HTTPException(503, "Não foi possível conciliar o evento do Asaas.") from exc
             else:
                 apply_charge(billing, invoice, charge)
+    return {"received": True}
+
+
+PAID = {"CONFIRMED", "RECEIVED", "RECEIVED_IN_CASH", "REFUNDED"}
+
+
+def subscription_payment_event(
+    payment: EventPayment, database, mode: str, provider: AsaasClient,
+) -> dict[str, bool]:
+    """Registra ou atualiza a fatura de uma cobrança mensal. Os dados vêm do Asaas, não do evento."""
+    try:
+        charge = provider.get_charge(payment.id)
+    except AsaasError as exc:
+        if exc.status == 404:
+            return {"received": True}
+        raise HTTPException(503, "Não foi possível conciliar o evento do Asaas.") from exc
+    if charge.subscription != payment.subscription:
+        return {"received": True}
+    status = "cancelled" if charge.deleted else STATUS.get(charge.status, "review")
+    amount = charge.amount_cents
+    if charge.original_amount_cents is not None and charge.status in PAID:
+        amount = charge.original_amount_cents
+    with database.engine.begin() as connection:
+        connection.execute(text("SET LOCAL statement_timeout = '5000ms'"))
+        billing = BillingRepository(connection)
+        billing.enable_webhook(mode)
+        billing.record_subscription_payment(
+            mode, charge.subscription, charge.id, charge.due_date, amount, status,
+            charge.invoice_url if status in {"open", "overdue", "processing"} else None,
+        )
     return {"received": True}

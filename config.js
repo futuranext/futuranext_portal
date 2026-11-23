@@ -5,6 +5,6 @@
  */
 window.FUTURANEXT_CONFIG = {
   whatsapp: "",
-  email: "",
+  email: "suporte@futuranext.com.br",
   companyName: "FuturaNext"
 };

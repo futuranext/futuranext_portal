@@ -79,6 +79,7 @@ p { overflow-wrap: anywhere; }
 .header-row { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; padding: 1rem 0; }
 .header-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .9rem; }
 .header-actions a { color: #eaf8f1; }
+.header-user { color: #c9f3df; font-weight: 600; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .header-actions .status-message { flex-basis: 100%; color: #fff0f2; }
 .workspace-layout { display: grid; grid-template-columns: 12rem minmax(0, 1fr); gap: clamp(1rem, 3vw, 2.6rem); padding: 2rem 0 4rem; }
 .workspace-sidebar nav { display: flex; flex-direction: column; gap: .35rem; }
@@ -135,3 +136,5 @@ p { overflow-wrap: anywhere; }
 .combobox-list [role="option"]:hover, .combobox-list [aria-selected="true"] { background: #d7f2e4; color: #064c39; }
 .combobox-empty { padding: .55rem .65rem; color: var(--muted); }
 .list-filter { max-width: 32rem; }
+
+.offer-price { margin: 0; font-weight: 700; color: var(--navy); }

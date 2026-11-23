@@ -44,9 +44,9 @@
   function renderCases() {
     const term=normalized(caseSearch.value.trim());
     const shown=cases.filter(c => (!caseSector.value || c.sector===caseSector.value) && (!caseArea.value || c.area===caseArea.value) && normalized(Object.values(c).join(' ')).includes(term));
-    $('caseCount').textContent = `${shown.length} exemplo${shown.length===1?'':'s'} encontrado${shown.length===1?'':'s'}`;
+    $('caseCount').textContent = `${shown.length} aplicaç${shown.length===1?'ão':'ões'} encontrada${shown.length===1?'':'s'}`;
     grid.replaceChildren();
-    if (!shown.length) { const empty=document.createElement('p'); empty.className='empty-cases'; empty.textContent='Nenhum exemplo encontrado. Tente outros filtros ou conte seu desafio no chat.';grid.appendChild(empty);return; }
+    if (!shown.length) { const empty=document.createElement('p'); empty.className='empty-cases'; empty.textContent='Nenhuma aplicação encontrada. Tente outros filtros ou conte seu desafio no chat.';grid.appendChild(empty);return; }
     shown.forEach(c => {
       const node=$('caseTemplate').content.cloneNode(true);
       node.querySelector('.case-sector').textContent=c.sector;
@@ -61,124 +61,129 @@
   [caseSearch,caseSector,caseArea].forEach(el=>el.addEventListener('input',renderCases));
   renderCases();
 
-  // Guided chat, no external AI or backend. All steps execute locally.
-  const steps = [
-    {id:'name',prompt:'Olá! 👋 Que bom ter você aqui. Sou o assistente de pré-atendimento da FuturaNext. Para começar, qual é seu nome?',placeholder:'Seu nome...',max:100,validate:v=>v.length>=2?'':'Informe seu nome com pelo menos 2 caracteres.'},
-    {id:'company',prompt:v=>`Prazer, ${v.name.split(' ')[0]}! Qual é o nome da sua empresa ou projeto?`,placeholder:'Empresa ou projeto...',max:120,validate:v=>v.length>=2?'':'Informe a empresa ou projeto.'},
-    {id:'sector',prompt:'Em qual área podemos ajudar?',choices:['Automação RPA','Inteligência artificial','Sistema ou portal web','Integrações e APIs','Dashboards e dados','Ainda não sei'],max:100},
-    {id:'problem',prompt:'Agora me conte o principal: qual problema você precisa resolver? Pode explicar com suas palavras e dar exemplos do processo atual.',placeholder:'Descreva a necessidade do seu negócio...',max:1500,validate:v=>v.length>=12?'':'Descreva um pouco mais (mínimo 12 caracteres).'},
-    {id:'priority',prompt:'Qual é a urgência aproximada desse projeto?',choices:['O quanto antes','Nos próximos 30 dias','Nos próximos 3 meses','Ainda estou planejando'],max:100},
-    {id:'contact',prompt:'Qual é o melhor e-mail ou WhatsApp para entrarmos em contato? (Digite e-mail ou telefone com DDD.)',placeholder:'E-mail ou WhatsApp com DDD...',max:150,validate:v=>/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)||v.replace(/\D/g,'').length>=10?'':'Informe um e-mail válido ou telefone com DDD (10 ou mais dígitos).'},
-    {id:'consent',prompt:'Para concluir: você autoriza que os dados informados sejam usados para o contato e avaliação da sua solicitação? Nesta versão de teste os dados ficam apenas neste navegador, até você escolher exportar ou compartilhá-los.',choices:['Sim, autorizo','Não autorizo'],max:30}
-  ];
-  const overlay=$('chatOverlay'), messages=$('chatMessages'), form=$('chatForm'), input=$('chatInput'), choices=$('chatChoices'), progress=$('chatProgress'), helper=$('chatHelper');
-  let index=0, values={}, completed=false, previousFocus=null;
+  // Atendimento com IA: o navegador guarda só a conversa aberta e envia o histórico à API da FuturaNext,
+  // que aplica o prompt fixo e os limites de uso. Nada é salvo neste navegador.
+  const apiBase=(config.apiBase||'').replace(/\/$/,'');
+  const contactEmail=config.email||'suporte@futuranext.com.br';
+  const overlay=$('chatOverlay'), messages=$('chatMessages'), form=$('chatForm'), input=$('chatInput'), choices=$('chatChoices'), helper=$('chatHelper'), send=$('chatSend');
+  const HELP='Respostas geradas por IA sobre a FuturaNext. Não compartilhe senhas, documentos ou dados de cartão.';
+  const GREETING='Olá! 👋 Sou o assistente virtual da FuturaNext. Posso explicar nossas soluções, como funciona o diagnóstico gratuito e o teste de 15 dias da plataforma. Como posso ajudar?';
+  const STARTERS=['Quais soluções vocês oferecem?','Como funciona o diagnóstico gratuito?','Quero testar a plataforma'];
+  let history=[], busy=false, previousFocus=null, leadSent=false;
   function addMessage(role,text) {
     const el=document.createElement('div');el.className='chat-message '+role;
     const who=document.createElement('span');who.className='chat-role';who.textContent=role==='bot'?'FuturaNext':'Você';
     const bubble=document.createElement('div');bubble.className='chat-bubble';bubble.textContent=text;
     el.append(who,bubble);messages.appendChild(el);messages.scrollTop=messages.scrollHeight;
+    return el;
   }
-  function question() {
-    const step=steps[index];
-    if (!step) return;
-    const msg=typeof step.prompt==='function'?step.prompt(values):step.prompt;
-    addMessage('bot',msg);
-    input.value='';input.maxLength=step.max||1500;input.placeholder=step.placeholder||'Escreva sua resposta ou escolha uma opção...';
-    choices.replaceChildren();
-    if(step.choices) step.choices.forEach(choice=>{
-      const btn=document.createElement('button');btn.type='button';btn.textContent=choice;
-      btn.addEventListener('click',()=>submitAnswer(choice));choices.appendChild(btn);
-    });
-    progress.style.width=(index/steps.length*100)+'%';
-    input.focus();
+  function choice(label,fn,secondary=false) {
+    const btn=document.createElement('button');btn.type='button';btn.textContent=label;
+    if(secondary) btn.className='secondary-action';
+    btn.addEventListener('click',fn);return btn;
   }
-  function resetChat(prefill='') {
-    index=0;values={};completed=false;messages.replaceChildren();choices.replaceChildren();
-    form.hidden=false;helper.textContent='Conversa guiada local: nenhuma mensagem é enviada automaticamente.';
-    question();
-    if(prefill) {
-      // Suggest scenario only after the first actual conversation question.
-      values.suggestedCase=prefill;
+  function renderChoices() {
+    const items=history.length?[]:STARTERS.map(text=>choice(text,()=>ask(text)));
+    if(!leadSent) items.push(choice('Falar com a equipe',leadForm,true));
+    choices.replaceChildren(...items);
+  }
+  async function post(path,body) {
+    const response=await fetch(apiBase+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    let data=null;try{data=await response.json();}catch{data=null;}
+    if(!response.ok) throw new Error(typeof data?.detail==='string'?data.detail:'Não foi possível concluir agora.');
+    return data;
+  }
+  async function ask(text) {
+    const value=text.trim();
+    if(!value||busy) return;
+    busy=true;send.disabled=true;input.value='';
+    addMessage('user',value);
+    history.push({role:'user',content:value.slice(0,1500)});
+    history=history.slice(-24);
+    while(history.length && history[0].role!=='user') history.shift();
+    renderChoices();
+    const typing=addMessage('bot','Digitando…');typing.classList.add('typing');
+    try {
+      const {reply}=await post('/api/v1/public/chat',{messages:history});
+      typing.remove();addMessage('bot',reply);
+      history.push({role:'assistant',content:reply.slice(0,1500)});
+    } catch(error) {
+      typing.remove();history.pop();
+      addMessage('bot',(error instanceof TypeError?'Não consegui me conectar agora.':error.message)+` Se preferir, use "Falar com a equipe" ou escreva para ${contactEmail}.`);
+    } finally {
+      busy=false;send.disabled=false;input.focus();
     }
   }
-  function openChat(prefill='') {
+  function leadField(label,name,attrs={}) {
+    const wrap=document.createElement('label');wrap.className='lead-field';
+    const span=document.createElement('span');span.textContent=label;
+    const control=document.createElement(attrs.multiline?'textarea':'input');
+    control.name=name;control.maxLength=attrs.max||150;control.required=!attrs.optional;
+    if(attrs.autocomplete)control.autocomplete=attrs.autocomplete;
+    if(attrs.multiline)control.rows=3;
+    wrap.append(span,control);return wrap;
+  }
+  function leadForm() {
+    const open=messages.querySelector('.lead-form');
+    if(open) {open.querySelector('input').focus();return;}
+    const box=document.createElement('form');box.className='chat-finished lead-form';
+    const title=document.createElement('strong');title.textContent='Deixe seu contato e a equipe da FuturaNext retorna para você.';
+    const consent=document.createElement('label');consent.className='lead-consent';
+    const check=document.createElement('input');check.type='checkbox';check.name='consent';check.required=true;
+    consent.append(check,document.createTextNode(' Autorizo a FuturaNext a usar estes dados e esta conversa para entrar em contato sobre minha solicitação.'));
+    const status=document.createElement('p');status.className='lead-status';status.setAttribute('role','status');
+    const submit=document.createElement('button');submit.type='submit';submit.textContent='Enviar para a equipe';
+    box.append(title,
+      leadField('Nome','name',{max:100,autocomplete:'name'}),
+      leadField('Empresa','company',{max:120,autocomplete:'organization'}),
+      leadField('E-mail ou WhatsApp com DDD','contact',{max:150,autocomplete:'email'}),
+      leadField('Como podemos ajudar? (opcional)','message',{max:1500,optional:true,multiline:true}),
+      consent,submit,status);
+    box.addEventListener('submit',async e=>{
+      e.preventDefault();
+      const data=new FormData(box);
+      const contact=String(data.get('contact')).trim();
+      if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)&&contact.replace(/\D/g,'').length<10){status.textContent='Informe um e-mail válido ou telefone com DDD.';return;}
+      submit.disabled=true;status.textContent='Enviando…';
+      try {
+        await post('/api/v1/public/leads',{name:String(data.get('name')).trim(),company:String(data.get('company')).trim(),contact,
+          message:String(data.get('message')||'').trim(),consent:check.checked,transcript:history.slice(-24)});
+        box.remove();leadSent=true;renderChoices();
+        addMessage('bot','Recebemos seu contato! A equipe da FuturaNext vai retornar em breve. Se quiser, continue perguntando por aqui.');
+      } catch(error) {
+        submit.disabled=false;
+        status.textContent=(error instanceof TypeError?'Sem conexão no momento.':error.message)+` Você também pode escrever para ${contactEmail}.`;
+      }
+    });
+    messages.appendChild(box);messages.scrollTop=messages.scrollHeight;
+    box.querySelector('input').focus();
+  }
+  function resetChat() {
+    history=[];busy=false;leadSent=false;send.disabled=false;
+    messages.replaceChildren();input.value='';helper.textContent=HELP;
+    addMessage('bot',GREETING);renderChoices();
+  }
+  function openChat(topic='') {
     previousFocus=document.activeElement;
     overlay.hidden=false;document.body.classList.add('chat-open');
-    resetChat(prefill);
+    if(!messages.childElementCount) resetChat();
+    if(topic) input.value=`Tenho interesse em algo parecido com: ${topic}.`;
+    input.focus();
   }
   function closeChat() {
     overlay.hidden=true;document.body.classList.remove('chat-open');
     if(previousFocus && typeof previousFocus.focus==='function') previousFocus.focus();
   }
-  function submitAnswer(raw) {
-    if(completed) return;
-    const step=steps[index], v=raw.trim();
-    if(!v) { input.focus();return; }
-    const error=step.validate?.(v);
-    if(error) {helper.textContent=error;input.focus();return;}
-    helper.textContent='Conversa guiada local: nenhuma mensagem é enviada automaticamente.';
-    addMessage('user',v);
-    if(step.id==='consent' && v==='Não autorizo') {
-      addMessage('bot','Tudo bem. Seu atendimento não será encaminhado e não vou criar um resumo para compartilhamento. Você pode fechar a janela ou recomeçar.');
-      completed=true;form.hidden=true;progress.style.width='100%';return;
-    }
-    values[step.id]=v;
-    index++;
-    if(index<steps.length) question(); else finishChat();
-  }
-  function buildSummary() {
-    const rows=[
-      'FUTURANEXT | NOVA SOLICITAÇÃO (PRÉ-ATENDIMENTO)',
-      `Data: ${new Date().toLocaleString('pt-BR')}`,
-      `Nome: ${values.name}`,
-      `Empresa/projeto: ${values.company}`,
-      `Área: ${values.sector}`,
-      `Necessidade: ${values.problem}`,
-      `Prazo: ${values.priority}`,
-      `Contato: ${values.contact}`,
-      `Autorização para contato: ${values.consent}`
-    ];
-    if(values.suggestedCase) rows.push(`Referência de interesse: ${values.suggestedCase}`);
-    return rows.join('\n');
-  }
-  function action(label,fn,secondary=false) {
-    const btn=document.createElement('button');btn.type='button';btn.textContent=label;
-    if(secondary) btn.className='secondary-action';btn.addEventListener('click',fn);return btn;
-  }
-  function finishChat() {
-    completed=true;progress.style.width='100%';form.hidden=true;
-    addMessage('bot',`Obrigado, ${values.name.split(' ')[0]}! Seu resumo está pronto. Esta versão é demonstrativa: ainda não existe envio automático para a FuturaNext. Escolha uma das opções abaixo para salvar ou encaminhar sua solicitação.`);
-    const container=document.createElement('div');container.className='chat-finished';
-    container.appendChild(action('Baixar resumo (.txt)',()=>{
-      const blob=new Blob([buildSummary()],{type:'text/plain;charset=utf-8'});
-      const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='futuranext-solicitacao.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
-    }));
-    container.appendChild(action('Copiar resumo',async()=>{
-      try {await navigator.clipboard.writeText(buildSummary());helper.textContent='Resumo copiado.';}
-      catch {helper.textContent='Não foi possível copiar automaticamente; use Baixar resumo.';}
-    },true));
-    const phone=(config.whatsapp||'').replace(/\D/g,'');
-    if(phone.length>=12) container.appendChild(action('Enviar via WhatsApp',()=>{
-      window.open('https://wa.me/'+phone+'?text='+encodeURIComponent(buildSummary()),'_blank','noopener,noreferrer');
-    }));
-    if(config.email && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.email)) container.appendChild(action('Enviar via e-mail',()=>{
-      window.location.href='mailto:'+config.email+'?subject='+encodeURIComponent('Novo diagnóstico - FuturaNext')+'&body='+encodeURIComponent(buildSummary());
-    },true));
-    container.appendChild(action('Nova conversa',()=>resetChat(),true));
-    messages.appendChild(container);messages.scrollTop=messages.scrollHeight;
-    helper.textContent='Sem envio automático ou armazenamento remoto. O compartilhamento depende da sua ação.';
-  }
-  form.addEventListener('submit', e=>{e.preventDefault();submitAnswer(input.value);});
+  form.addEventListener('submit', e=>{e.preventDefault();void ask(input.value);});
   input.addEventListener('keydown',e=>{
     if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();if(input.value.trim())form.requestSubmit();}
   });
   document.querySelectorAll('.js-open-chat').forEach(b=>b.addEventListener('click',()=>openChat()));
   $('chatClose').addEventListener('click',closeChat);
-  $('chatRestart').addEventListener('click',()=>{if(!completed&&index>0&&!window.confirm('Recomeçar o diagnóstico e descartar as respostas atuais?'))return;resetChat();});
+  $('chatRestart').addEventListener('click',()=>{if(history.length&&!window.confirm('Recomeçar a conversa e apagar as mensagens atuais?'))return;resetChat();});
   overlay.addEventListener('click',e=>{if(e.target===overlay)closeChat();});
   document.addEventListener('keydown',e=>{
     if(e.key==='Escape'&&!overlay.hidden)closeChat();
-    if(e.key==='Tab'&&!overlay.hidden){const tabbable=[...overlay.querySelectorAll('button:not([hidden]):not(:disabled),textarea:not([disabled])')].filter(el=>el.getClientRects().length);if(!tabbable.length)return;const first=tabbable[0],last=tabbable[tabbable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}
+    if(e.key==='Tab'&&!overlay.hidden){const tabbable=[...overlay.querySelectorAll('button:not([hidden]):not(:disabled),textarea:not([disabled]),input:not([disabled])')].filter(el=>el.getClientRects().length);if(!tabbable.length)return;const first=tabbable[0],last=tabbable[tabbable.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}
   });
 })();

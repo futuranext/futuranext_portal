@@ -138,20 +138,21 @@ class Repository:
 
     def list_products(self) -> list[Record]:
         return self._rows("""
-            SELECT id, slug, name, description, active, offerable, launch_url
+            SELECT id, slug, name, description, active, offerable, launch_url, price_cents
             FROM futuranext.products ORDER BY name, id
         """)
 
     def create_product(
         self, slug: str, name: str, description: str, *,
-        offerable: bool = False, launch_url: str | None = None,
+        offerable: bool = False, launch_url: str | None = None, price_cents: int | None = None,
     ) -> Record | None:
         return self._one(
             """
-            INSERT INTO futuranext.products (slug, name, description, offerable, launch_url)
-            VALUES (:slug, :name, :description, :offerable, :launch_url)
-            RETURNING id, slug, name, description, active, offerable, launch_url
+            INSERT INTO futuranext.products (slug, name, description, offerable, launch_url, price_cents)
+            VALUES (:slug, :name, :description, :offerable, :launch_url, :price_cents)
+            RETURNING id, slug, name, description, active, offerable, launch_url, price_cents
         """,
+            price_cents=price_cents,
             slug=slug,
             name=name,
             description=description,
@@ -162,14 +163,19 @@ class Repository:
     def update_product(
         self, product_id: UUID, name: str, description: str, active: bool, *,
         offerable: bool | None = None, launch_url: str | None = None, update_launch_url: bool = False,
+        price_cents: int | None = None, update_price: bool = False,
     ) -> Record | None:
         return self._one(
             """
             UPDATE futuranext.products SET name = :name, description = :description, active = :active,
                 offerable = COALESCE(:offerable, offerable),
-                launch_url = CASE WHEN :update_launch_url THEN :launch_url ELSE launch_url END
-            WHERE id = :product_id RETURNING id, slug, name, description, active, offerable, launch_url
+                launch_url = CASE WHEN :update_launch_url THEN :launch_url ELSE launch_url END,
+                price_cents = CASE WHEN :update_price THEN :price_cents ELSE price_cents END
+            WHERE id = :product_id
+            RETURNING id, slug, name, description, active, offerable, launch_url, price_cents
         """,
+            price_cents=price_cents,
+            update_price=update_price,
             product_id=product_id,
             name=name,
             description=description,

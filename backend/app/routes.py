@@ -151,7 +151,7 @@ def create_product(payload: s.ProductCreate, identity: CurrentUser, database: Da
         require_permission(repo, "admin.product.manage")
         return repo.create_product(
             payload.slug, payload.name, payload.description,
-            offerable=payload.offerable, launch_url=payload.launch_url,
+            offerable=payload.offerable, launch_url=payload.launch_url, price_cents=payload.price_cents,
         )
 
 
@@ -163,6 +163,7 @@ def update_product(product_id: UUID, payload: s.ProductUpdate, identity: Current
             product_id, payload.name, payload.description, payload.active,
             offerable=payload.offerable, launch_url=payload.launch_url,
             update_launch_url="launch_url" in payload.model_fields_set,
+            price_cents=payload.price_cents, update_price="price_cents" in payload.model_fields_set,
         ))
 
 
@@ -316,10 +317,10 @@ def edit_tenant_user(
 
 
 def require_users_access(repo: Repository, request: Request, *, write: bool) -> None:
-    if request.url.path.startswith("/api/v1/admin/"):
-        require_permission(repo, "admin.access")
-    elif not repo.has_permission("tenant.access"):
-        raise HTTPException(404, "Empresa indisponível.")
+    # A gestão de usuários é exclusiva da equipe FuturaNext; perfis de cliente não veem a lista.
+    if not request.url.path.startswith("/api/v1/admin/") and not repo.has_permission("admin.access"):
+        raise HTTPException(404, "Recurso indisponível.")
+    require_permission(repo, "admin.access")
     require_permission(repo, "admin.users.manage" if write else "admin.users.read")
 
 

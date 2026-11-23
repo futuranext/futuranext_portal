@@ -15,6 +15,25 @@ const methods = [['boleto', 'Boleto'], ['pix', 'Pix'], ['card', 'Cartão de cré
 
 export const money = (cents) => currency.format(cents / 100);
 
+const shortDate = (value) => value ? value.split('-').reverse().join('/') : '';
+
+// Situação da assinatura mensal em uma frase (portal e administração).
+export function subscriptionText(subscription, admin = false) {
+  if (!subscription) {
+    return admin ? 'Cobrança automática desligada. Ainda não há assinatura para esta empresa.'
+      : 'A empresa ainda não tem assinatura mensal.';
+  }
+  const value = subscription.value_cents ? money(subscription.value_cents) : null;
+  const next = subscription.next_due_date ? ` Próximo vencimento: ${shortDate(subscription.next_due_date)}.` : '';
+  if (!subscription.enabled) return admin ? 'Cobrança automática desligada.' : 'A cobrança mensal está pausada.';
+  if (subscription.status === 'active') return `Assinatura ativa: ${value} por mês.${next}`;
+  if (subscription.status === 'error') {
+    return admin ? 'Cobrança ligada, mas o Asaas recusou ou não confirmou a assinatura. Desligue e ligue de novo ou confira no Asaas.'
+      : 'A assinatura está em conferência pela FuturaNext.';
+  }
+  return admin ? 'Cobrança ligada, aguardando o vínculo com o Asaas.' : 'A assinatura está sendo preparada.';
+}
+
 export function invoiceItems(items) {
   return element('ul', {class: 'record-list'}, items.map(({name, amount_cents: cents}) => (
     element('li', {class: 'summary-row'}, element('span', {}, name), element('strong', {}, money(cents)))
@@ -235,6 +254,7 @@ export async function renderBillingPortal(target, {tenant, signal, canPay = true
 
   target.replaceChildren(panel('Pagamento',
     canPay ? muted('Pague a mensalidade por boleto, Pix ou cartão de crédito, aqui mesmo no portal.') : null,
+    model.subscription ? element('p', {class: 'summary-row'}, element('strong', {}, subscriptionText(model.subscription))) : null,
     canPay && model.payment_available && !model.customer_ready
       ? muted('O cadastro de pagamento da empresa está em preparação. Caso persista, fale com a FuturaNext.')
       : null,

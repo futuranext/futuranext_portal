@@ -52,14 +52,28 @@ const productFields = (item = {}) => [
   description(item.description ?? ''),
   inputField('URL externa da ferramenta', 'launch_url', {type: 'url', maxlength: 2048, value: item.launch_url},
     'Para ferramentas por link. Use HTTPS, sem credenciais ou parâmetros.'),
-  checkField('Oferecer para aquisição no portal', 'offerable', item.offerable),
+  inputField('Mensalidade em reais', 'price', {
+    type: 'number', inputmode: 'decimal', min: '.01', max: 100000, step: '.01',
+    value: item.price_cents ? item.price_cents / 100 : '',
+  }, 'Com preço e oferta ligada, o administrador da empresa contrata pelo portal e o valor entra na assinatura mensal.'),
+  checkField('Oferecer para aquisição no portal e no teste grátis', 'offerable', item.offerable),
 ];
+
+function priceCents(value) {
+  if (!String(value ?? '').trim()) return null;
+  const cents = Math.round(Number(value) * 100);
+  if (!Number.isSafeInteger(cents) || cents <= 0 || cents > 10000000) {
+    throw new UserMessage('Informe uma mensalidade entre R$ 0,01 e R$ 100.000,00, ou deixe em branco.');
+  }
+  return cents;
+}
 
 function productValues(data) {
   return {
     description: data.get('description').trim(),
     launch_url: data.get('launch_url').trim() || null,
     offerable: data.has('offerable'),
+    price_cents: priceCents(data.get('price')),
   };
 }
 

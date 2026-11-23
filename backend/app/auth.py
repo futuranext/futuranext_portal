@@ -304,11 +304,15 @@ class SupabaseAuth:
                 pass
             raise
 
-    def send_invitation(self, email: str, redirect_url: str) -> Delivery:
+    def send_invitation(self, email: str, redirect_url: str, *, full_name: str | None = None) -> Delivery:
+        body: dict[str, Any] = {"email": email}
+        if full_name:
+            # Nome exibido no topo do portal (user_metadata.full_name).
+            body["data"] = {"full_name": full_name}
         try:
             response = self._request(
                 "POST", "/invite", headers=self._admin_headers(), params={"redirect_to": redirect_url},
-                json={"email": email},
+                json=body,
             )
         except AuthUnavailable:
             logger.warning("auth_invite_unavailable")

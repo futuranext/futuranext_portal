@@ -1,5 +1,5 @@
 import {api, resource} from './client.js';
-import {invoiceItems, invoiceRecords, money} from './billing-portal.js';
+import {invoiceItems, invoiceRecords, money, subscriptionText} from './billing-portal.js';
 import {
   actionForm, button, checkField, combobox, element, field, inputField, muted, notice, panel,
   runAction, select, statusMessage, UserMessage,
@@ -74,6 +74,46 @@ function accountPanel(model, save, sync) {
     element('details', {class: 'edit-disclosure'}, element('summary', {}, 'Vincular cliente existente'), accountForm));
 }
 
+function subscriptionPanel(model, save) {
+  const area = element('div', {class: 'stack compact'});
+  const feedback = statusMessage();
+
+  function draw() {
+    const current = model.subscription;
+    const on = current?.enabled;
+    const items = [muted(subscriptionText(current, true))];
+    if (on) {
+      const off = button('Desligar cobrança automática', true);
+      off.addEventListener('click', runAction(off, feedback, async () => {
+        if (!window.confirm('Desligar a cobrança mensal desta empresa? As faturas já geradas continuam no Asaas.')) return null;
+        await save({enabled: false});
+        draw();
+        return 'Cobrança automática desligada.';
+      }));
+      items.push(element('div', {class: 'form-actions'}, off));
+    } else {
+      items.push(actionForm([
+        inputField('Primeiro vencimento', 'next_due_date', {type: 'date', min: localToday(), required: true,
+          value: current?.next_due_date && current.next_due_date >= localToday() ? current.next_due_date : ''}),
+      ], 'Ligar cobrança automática', async (data) => {
+        const due = data.get('next_due_date');
+        if (!due || due < localToday()) throw new UserMessage('Escolha um vencimento a partir de hoje.');
+        await save({enabled: true, next_due_date: due});
+        draw();
+        return 'Cobrança automática ligada.';
+      }));
+    }
+    area.replaceChildren(...items);
+  }
+  draw();
+  return {
+    element: panel('Cobrança mensal automática',
+      muted('O Asaas gera todo mês uma fatura com a soma dos serviços ativos. O cliente paga por boleto, Pix ou cartão no portal.'),
+      area, feedback),
+    draw,
+  };
+}
+
 async function companyBilling(target, tenant, signal) {
   const base = `${clientsPath}/${resource(tenant.id)}/billing`;
   const model = await api(base, {signal});
@@ -125,6 +165,7 @@ async function companyBilling(target, tenant, signal) {
       model.services = model.services.map((item) => item.id === updated.id ? updated : item);
       title.textContent = serviceLabel(updated);
       updateSummary();
+      await refreshSubscription();
     });
     return element('details', {class: 'edit-disclosure'}, title, form);
   }
@@ -175,6 +216,7 @@ async function companyBilling(target, tenant, signal) {
     emptyServices.remove();
     servicesList.append(serviceRow(service));
     updateSummary();
+    await refreshSubscription();
   });
   const connection = accountPanel(model, async (customerId) => {
     if (!customerId) throw new UserMessage('Informe o ID do cliente no Asaas.');
@@ -187,13 +229,28 @@ async function companyBilling(target, tenant, signal) {
     Object.assign(model, {account: latest.account, customer_status: latest.customer_status, customer_message: latest.customer_message});
     updateSummary();
   });
+  const recurring = subscriptionPanel(model, async (body) => {
+    const latest = await api(`${base}/subscription`, {method: 'PUT', body, signal});
+    if (signal.aborted) return;
+    Object.assign(model, latest);
+    showInvoices();
+  });
+  // A API soma os serviços ativos à assinatura; recarrega o valor exibido depois de cada alteração.
+  async function refreshSubscription() {
+    if (!model.subscription?.enabled) return;
+    const latest = await api(base, {signal});
+    if (signal.aborted) return;
+    model.subscription = latest.subscription;
+    recurring.draw();
+  }
   updateSummary();
   showInvoices();
   target.replaceChildren(
     connection,
+    recurring.element,
     panel('Serviços mensais',
       element('details', {class: 'edit-disclosure'}, element('summary', {}, 'Novo serviço'), newService), servicesList),
-    panel('Gerar cobrança', muted('Os nomes e valores dos serviços ativos ficam registrados na cobrança.'), summary, newInvoice),
+    panel('Gerar cobrança avulsa', muted('Use para cobranças fora da mensalidade. Os nomes e valores dos serviços ativos ficam registrados na cobrança.'), summary, newInvoice),
     panel('Histórico de cobranças', invoiceFeedback, invoicesList),
   );
 }
